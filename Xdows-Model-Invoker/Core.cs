@@ -7,9 +7,10 @@ namespace Xdows_Model_Invoker
     public static class ModelInvoker
     {
         private const string DefaultModelFileName = "Xdows-Model.zip";
-
-        // Ensure the model file is available in the application's base directory.
-        // If it's not present, attempt to copy it from an embedded resource or from the assembly directory.
+        private static readonly object _initLock = new();
+        private static MLContext? _mlContext;
+        private static ITransformer? _model;
+        private static string? _loadedModelPath;
         private static string EnsureModelAvailable()
         {
             string baseDir = AppContext.BaseDirectory;
@@ -20,7 +21,6 @@ namespace Xdows_Model_Invoker
 
             var asm = Assembly.GetExecutingAssembly();
 
-            // Try embedded resource
             var resourceName = asm.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith(DefaultModelFileName, StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrEmpty(resourceName))
             {
@@ -32,8 +32,6 @@ namespace Xdows_Model_Invoker
                     return destPath;
                 }
             }
-
-            // Try to find the file next to the assembly (useful when shipped alongside the DLL)
             var asmDir = Path.GetDirectoryName(asm.Location) ?? baseDir;
             var candidate = Path.Combine(asmDir, DefaultModelFileName);
             if (File.Exists(candidate))
@@ -47,27 +45,16 @@ namespace Xdows_Model_Invoker
 
         public static (bool isVirus, float probability) PredictWithMlNet(string modelPath, float[] features)
         {
-            var mlContext = new MLContext();
-
-            // Load the model
-            ITransformer model;
+            var mlContextLocal = new MLContext();
+            ITransformer tempModel;
             using (var fileStream = new FileStream(modelPath, FileMode.Open, FileAccess.Read))
             {
-                model = mlContext.Model.Load(fileStream, out _);
+                tempModel = mlContextLocal.Model.Load(fileStream, out _);
             }
 
-            // Create prediction engine
-            var predictionEngine = mlContext.Model.CreatePredictionEngine<ModelInput, ModelOutput>(model);
-
-            // Create input
-            var input = new ModelInput
-            {
-                Features = features
-            };
-
-            // Predict
+            var predictionEngine = mlContextLocal.Model.CreatePredictionEngine<ModelInput, ModelOutput>(tempModel);
+            var input = new ModelInput { Features = features };
             var prediction = predictionEngine.Predict(input);
-
             return (prediction.PredictedLabel, prediction.Probability * 100);
         }
 
@@ -79,21 +66,64 @@ namespace Xdows_Model_Invoker
             var features = FeatureExtractor.ExtractFeatures(filePath);
             var floatFeatures = features.ToFloatArray();
 
-            return PredictWithMlNet(modelPath, floatFeatures);
+            Initialize(modelPath);
+            return PredictWithInitializedModel(floatFeatures);
+        }
+        public static void Initialize(string? modelPath = null)
+        {
+            lock (_initLock)
+            {
+                if (_model != null && _loadedModelPath == modelPath)
+                    return;
+
+                string path = modelPath ?? EnsureModelAvailable();
+
+                _mlContext = new MLContext();
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+                _model = _mlContext.Model.Load(fs, out _);
+                _loadedModelPath = path;
+            }
         }
 
-        // Overload that uses the default internal model and ensures it is available (copied) before prediction.
+        public static bool IsInitialized => _model != null;
+        public static void UnloadModel()
+        {
+            lock (_initLock)
+            {
+                _model = null;
+                _mlContext = null;
+                _loadedModelPath = null;
+            }
+        }
+        private static (bool isVirus, float probability) PredictWithInitializedModel(float[] features)
+        {
+            if (_mlContext == null || _model == null)
+                throw new InvalidOperationException("ModelInvoker is not initialized. Call Initialize() before scanning.");
+
+            var predictionEngine = _mlContext.Model.CreatePredictionEngine<ModelInput, ModelOutput>(_model);
+            var input = new ModelInput { Features = features };
+            var prediction = predictionEngine.Predict(input);
+            return (prediction.PredictedLabel, prediction.Probability * 100);
+        }
+
         public static (bool isVirus, float probability) ScanFile(string filePath)
         {
-            string modelPath = EnsureModelAvailable();
-            return ScanFile(filePath, modelPath);
+            if (!File.Exists(filePath))
+                throw new FileNotFoundException("File not found", filePath);
+
+            if (_model == null)
+                throw new InvalidOperationException("ModelInvoker is not initialized");
+
+            var features = FeatureExtractor.ExtractFeatures(filePath);
+            var floatFeatures = features.ToFloatArray();
+            return PredictWithInitializedModel(floatFeatures);
         }
     }
 
     internal class ModelInput
     {
         [VectorType(279)]
-        public float[] Features { get; set; } = System.Array.Empty<float>();
+        public float[] Features { get; set; } = [];
     }
 
     internal class ModelOutput

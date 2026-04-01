@@ -30,6 +30,8 @@ internal class Program
 
         try
         {
+            Xdows_Model_Invoker.ModelInvoker.Initialize();
+
             var (isVirus, probability) = Xdows_Model_Invoker.ModelInvoker.ScanFile(filePath);
 
             if (!isVirus)
