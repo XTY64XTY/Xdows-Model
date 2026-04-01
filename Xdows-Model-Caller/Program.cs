@@ -1,6 +1,3 @@
-using Microsoft.ML;
-using Microsoft.ML.Data;
-
 namespace Xdows_Model_Caller;
 
 internal class Program
@@ -31,19 +28,9 @@ internal class Program
             return;
         }
 
-        string modelPath = "Xdows-Model.zip";
-        if (string.IsNullOrEmpty(modelPath))
-        {
-            Console.WriteLine("错误：未找到模型文件！");
-            return;
-        }
-
         try
         {
-            var features = FeatureExtractor.ExtractFeatures(filePath);
-            var floatFeatures = features.ToFloatArray();
-
-            var (isVirus, probability) = PredictWithMlNet(modelPath, floatFeatures);
+            var (isVirus, probability) = Xdows_Model_Invoker.ModelInvoker.ScanFile(filePath);
 
             if (!isVirus)
             {
@@ -56,51 +43,16 @@ internal class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"错误：{ex.Message}");
+            // Print full exception including inner exceptions to reveal the real cause (TargetInvocationException wraps inner)
+            Console.WriteLine("错误：发生异常，详细信息：");
+            Console.WriteLine(ex.ToString());
+            if (ex.InnerException != null)
+            {
+                Console.WriteLine("内部异常：");
+                Console.WriteLine(ex.InnerException.ToString());
+            }
         }
     }
 
-    private static (bool isVirus, float probability) PredictWithMlNet(string modelPath, float[] features)
-    {
-        var mlContext = new MLContext();
-
-        // Load the model
-        ITransformer model;
-        using (var fileStream = new FileStream(modelPath, FileMode.Open, FileAccess.Read))
-        {
-            model = mlContext.Model.Load(fileStream, out _);
-        }
-
-        // Create prediction engine
-        var predictionEngine = mlContext.Model.CreatePredictionEngine<ModelInput, ModelOutput>(model);
-
-        // Create input
-        var input = new ModelInput
-        {
-            Features = features
-        };
-
-        // Predict
-        var prediction = predictionEngine.Predict(input);
-
-        return (prediction.PredictedLabel, prediction.Probability * 100);
-    }
 }
 
-public class ModelInput
-{
-    [VectorType(279)]
-    public float[] Features { get; set; } = Array.Empty<float>();
-}
-
-public class ModelOutput
-{
-    [ColumnName("PredictedLabel")]
-    public bool PredictedLabel { get; set; }
-
-    [ColumnName("Score")]
-    public float Score { get; set; }
-
-    [ColumnName("Probability")]
-    public float Probability { get; set; }
-}

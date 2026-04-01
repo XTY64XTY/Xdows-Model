@@ -6,5 +6,6 @@
   <Project Path="Xdows-Model-Caller/Xdows-Model-Caller.csproj">
     <Platform Solution="*|x64" Project="x64" />
   </Project>
+  <Project Path="Xdows-Model-Invoker/Xdows-Model-Invoker.csproj" Id="c395d957-415d-4885-bd49-90b250359506" />
   <Project Path="Xdows-Model-Maker/Xdows-Model-Maker.csproj" Id="22ac8d4f-dd3e-4210-b84c-1e6fab74fbfa" />
 </Solution>
