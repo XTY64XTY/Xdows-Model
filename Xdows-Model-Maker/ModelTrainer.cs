@@ -16,10 +16,6 @@ public class ModelTrainer
         _mlContext = new MLContext(seed: config.RandomSeed);
     }
 
-    public ModelTrainer() : this(new TrainingConfig())
-    {
-    }
-
     public ITransformer TrainModel(List<FileData> fileData, string modelPath, string? onnxPath = null)
     {
         Console.WriteLine("\n开始训练模型...");

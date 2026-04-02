@@ -8,9 +8,9 @@ public class TrainingConfig
     public string OnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model.onnx");
 
     public double LearningRate { get; set; } = 0.1;
-    public int NumberOfLeaves { get; set; } = 64;
-    public int MinimumExampleCountPerLeaf { get; set; } = 32;
-    public int NumberOfIterations { get; set; } = 6400;
+    public int NumberOfLeaves { get; set; } = 31;
+    public int MinimumExampleCountPerLeaf { get; set; } = 20;
+    public int NumberOfIterations { get; set; } = 400;
     public int? RandomSeed { get; set; } = 42;
 
     public void PrintConfig()

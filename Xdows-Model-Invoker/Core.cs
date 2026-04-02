@@ -136,17 +136,13 @@ namespace Xdows_Model_Invoker
             bool isVirus = false;
             float probability = 0f;
 
-            if (predictedLabelOutput != null)
-            {
-                var labelResult = predictedLabelOutput.AsEnumerable<bool>().ToArray();
-                if (labelResult.Length > 0) isVirus = labelResult[0];
-            }
-
             if (probabilityOutput != null)
             {
                 var probResult = probabilityOutput.AsEnumerable<float>().ToArray();
                 if (probResult.Length > 0) probability = probResult[0] * 100;
             }
+
+            isVirus = probability >= 90.0f;
 
             return (isVirus, probability);
         }
