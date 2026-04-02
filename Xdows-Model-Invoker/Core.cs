@@ -1,15 +1,15 @@
-﻿using Microsoft.ML;
-using Microsoft.ML.Data;
+using Microsoft.ML.OnnxRuntime;
+using Microsoft.ML.OnnxRuntime.Tensors;
 using System.Reflection;
 
 namespace Xdows_Model_Invoker
 {
     public static class ModelInvoker
     {
-        private const string DefaultModelFileName = "Xdows-Model.zip";
+        private const string DefaultModelFileName = "Xdows-Model.onnx";
         private static readonly object _initLock = new();
-        private static MLContext? _mlContext;
-        private static ITransformer? _model;
+        private static SessionOptions? _sessionOptions;
+        private static InferenceSession? _session;
         private static string? _loadedModelPath;
         private static string EnsureModelAvailable()
         {
@@ -45,17 +45,8 @@ namespace Xdows_Model_Invoker
 
         public static (bool isVirus, float probability) PredictWithMlNet(string modelPath, float[] features)
         {
-            var mlContextLocal = new MLContext();
-            ITransformer tempModel;
-            using (var fileStream = new FileStream(modelPath, FileMode.Open, FileAccess.Read))
-            {
-                tempModel = mlContextLocal.Model.Load(fileStream, out _);
-            }
-
-            var predictionEngine = mlContextLocal.Model.CreatePredictionEngine<ModelInput, ModelOutput>(tempModel);
-            var input = new ModelInput { Features = features };
-            var prediction = predictionEngine.Predict(input);
-            return (prediction.PredictedLabel, prediction.Probability * 100);
+            using var session = CreateSession(modelPath);
+            return RunInference(session, features);
         }
 
         public static (bool isVirus, float probability) ScanFile(string filePath, string modelPath)
@@ -73,37 +64,38 @@ namespace Xdows_Model_Invoker
         {
             lock (_initLock)
             {
-                if (_model != null && _loadedModelPath == modelPath)
+                if (_session != null && _loadedModelPath == modelPath)
                     return;
 
                 string path = modelPath ?? EnsureModelAvailable();
 
-                _mlContext = new MLContext();
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-                _model = _mlContext.Model.Load(fs, out _);
+                _session?.Dispose();
+                _sessionOptions?.Dispose();
+
+                _sessionOptions = new SessionOptions();
+                _session = CreateSession(path);
                 _loadedModelPath = path;
             }
         }
 
-        public static bool IsInitialized => _model != null;
+        public static bool IsInitialized => _session != null;
         public static void UnloadModel()
         {
             lock (_initLock)
             {
-                _model = null;
-                _mlContext = null;
+                _session?.Dispose();
+                _session = null;
+                _sessionOptions?.Dispose();
+                _sessionOptions = null;
                 _loadedModelPath = null;
             }
         }
         private static (bool isVirus, float probability) PredictWithInitializedModel(float[] features)
         {
-            if (_mlContext == null || _model == null)
+            if (_session == null)
                 throw new InvalidOperationException("ModelInvoker is not initialized. Call Initialize() before scanning.");
 
-            var predictionEngine = _mlContext.Model.CreatePredictionEngine<ModelInput, ModelOutput>(_model);
-            var input = new ModelInput { Features = features };
-            var prediction = predictionEngine.Predict(input);
-            return (prediction.PredictedLabel, prediction.Probability * 100);
+            return RunInference(_session, features);
         }
 
         public static (bool isVirus, float probability) ScanFile(string filePath)
@@ -111,30 +103,52 @@ namespace Xdows_Model_Invoker
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("File not found", filePath);
 
-            if (_model == null)
+            if (_session == null)
                 throw new InvalidOperationException("ModelInvoker is not initialized");
 
             var features = FeatureExtractor.ExtractFeatures(filePath);
             var floatFeatures = features.ToFloatArray();
             return PredictWithInitializedModel(floatFeatures);
         }
-    }
 
-    internal class ModelInput
-    {
-        [VectorType(279)]
-        public float[] Features { get; set; } = [];
-    }
+        private static InferenceSession CreateSession(string modelPath)
+        {
+            var options = new SessionOptions();
+            return new InferenceSession(modelPath, options);
+        }
 
-    internal class ModelOutput
-    {
-        [ColumnName("PredictedLabel")]
-        public bool PredictedLabel { get; set; }
+        private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features)
+        {
+            var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, 279 });
+            var labelTensor = new DenseTensor<bool>(new Memory<bool>(new bool[] { false }), new[] { 1, 1 });
 
-        [ColumnName("Score")]
-        public float Score { get; set; }
+            var inputs = new List<NamedOnnxValue>
+            {
+                NamedOnnxValue.CreateFromTensor("Features", featuresTensor),
+                NamedOnnxValue.CreateFromTensor("Label", labelTensor)
+            };
 
-        [ColumnName("Probability")]
-        public float Probability { get; set; }
+            using var results = session.Run(inputs);
+
+            var predictedLabelOutput = results.FirstOrDefault(r => r.Name == "PredictedLabel.output");
+            var probabilityOutput = results.FirstOrDefault(r => r.Name == "Probability.output");
+
+            bool isVirus = false;
+            float probability = 0f;
+
+            if (predictedLabelOutput != null)
+            {
+                var labelResult = predictedLabelOutput.AsEnumerable<bool>().ToArray();
+                if (labelResult.Length > 0) isVirus = labelResult[0];
+            }
+
+            if (probabilityOutput != null)
+            {
+                var probResult = probabilityOutput.AsEnumerable<float>().ToArray();
+                if (probResult.Length > 0) probability = probResult[0] * 100;
+            }
+
+            return (isVirus, probability);
+        }
     }
 }
