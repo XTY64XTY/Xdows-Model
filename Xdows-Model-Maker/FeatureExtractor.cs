@@ -6,7 +6,7 @@ public class FeatureExtractor
     {
         var features = new FileFeatures();
         var fileInfo = new FileInfo(filePath);
-        
+
         var bytes = File.ReadAllBytes(filePath);
 
         features.FileSize = bytes.Length;
@@ -20,7 +20,7 @@ public class FeatureExtractor
     {
         var features = new FileFeatures();
         var fileInfo = new FileInfo(filePath);
-        
+
         var bytes = await File.ReadAllBytesAsync(filePath);
 
         features.FileSize = bytes.Length;
@@ -125,11 +125,11 @@ public class FeatureExtractor
                 features.HasPeHeader = true;
             }
         }
+        //if (!features.HasPeHeader)
+        //{
 
-        features.HasElfHeader = bytes.Length >= 4 && bytes[0] == 0x7F && bytes[1] == 'E' && bytes[2] == 'L' && bytes[3] == 'F';
-        features.HasZipHeader = bytes.Length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4B;
-        features.HasRarHeader = bytes.Length >= 4 && bytes[0] == 0x52 && bytes[1] == 0x61 && bytes[2] == 0x72 && bytes[3] == 0x21;
-
+        //    throw new Exception("不是PE文件");
+        //}
         features.MaxZeroByteRun = maxZeroRun;
     }
 
@@ -137,7 +137,7 @@ public class FeatureExtractor
     {
         const int blockSize = 256;
         int numBlocks = (bytes.Length + blockSize - 1) / blockSize;
-        
+
         if (numBlocks == 0)
         {
             features.MinBlockEntropy = 0;
@@ -206,11 +206,8 @@ public class FileFeatures
     public double DigitRatio { get; set; }
     public bool HasDosHeader { get; set; }
     public bool HasPeHeader { get; set; }
-    public bool HasElfHeader { get; set; }
-    public bool HasZipHeader { get; set; }
-    public bool HasRarHeader { get; set; }
     public int MaxZeroByteRun { get; set; }
-    
+
     // 新增特征
     public double ZeroByteRatio { get; set; }
     public double HighEntropyRatio { get; set; }
@@ -218,21 +215,21 @@ public class FileFeatures
     public float[] ToFloatArray()
     {
         var features = new List<float>();
-        
+
         foreach (var freq in ByteFrequency)
         {
             features.Add((float)freq);
         }
-        
-        features.Add((float)FileSize);
+
+        features.Add(FileSize);
         features.Add((float)Entropy);
         features.Add((float)MinBlockEntropy);
         features.Add((float)MaxBlockEntropy);
         features.Add((float)MeanBlockEntropy);
-        features.Add((float)UniqueBytes);
-        features.Add((float)MostCommonByte);
+        features.Add(UniqueBytes);
+        features.Add(MostCommonByte);
         features.Add((float)MostCommonByteRatio);
-        features.Add((float)LeastCommonByte);
+        features.Add(LeastCommonByte);
         features.Add((float)LeastCommonByteRatio);
         features.Add((float)PrintableCharRatio);
         features.Add((float)ControlCharRatio);
@@ -241,15 +238,12 @@ public class FileFeatures
         features.Add((float)DigitRatio);
         features.Add(HasDosHeader ? 1.0f : 0.0f);
         features.Add(HasPeHeader ? 1.0f : 0.0f);
-        features.Add(HasElfHeader ? 1.0f : 0.0f);
-        features.Add(HasZipHeader ? 1.0f : 0.0f);
-        features.Add(HasRarHeader ? 1.0f : 0.0f);
-        features.Add((float)MaxZeroByteRun);
-        
+        features.Add(MaxZeroByteRun);
+
         // 新增特征
         features.Add((float)ZeroByteRatio);
         features.Add((float)HighEntropyRatio);
-        
+
         return features.ToArray();
     }
 }

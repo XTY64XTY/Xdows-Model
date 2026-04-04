@@ -125,7 +125,7 @@ namespace Xdows_Model_Invoker
 
         private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features)
         {
-            var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, 279 });
+            var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, 276 });
             var labelTensor = new DenseTensor<bool>(new Memory<bool>(new bool[] { false }), new[] { 1, 1 });
 
             var inputs = new List<NamedOnnxValue>

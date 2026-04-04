@@ -130,10 +130,6 @@ public class FeatureExtractor
             }
         }
 
-        features.HasElfHeader = bytes.Length >= 4 && bytes[0] == 0x7F && bytes[1] == 'E' && bytes[2] == 'L' && bytes[3] == 'F';
-        features.HasZipHeader = bytes.Length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4B;
-        features.HasRarHeader = bytes.Length >= 4 && bytes[0] == 0x52 && bytes[1] == 0x61 && bytes[2] == 0x72 && bytes[3] == 0x21;
-
         features.MaxZeroByteRun = maxZeroRun;
     }
 
@@ -210,9 +206,6 @@ public class FileFeatures
     public double DigitRatio { get; set; }
     public bool HasDosHeader { get; set; }
     public bool HasPeHeader { get; set; }
-    public bool HasElfHeader { get; set; }
-    public bool HasZipHeader { get; set; }
-    public bool HasRarHeader { get; set; }
     public int MaxZeroByteRun { get; set; }
     
     public double ZeroByteRatio { get; set; }
@@ -244,9 +237,6 @@ public class FileFeatures
         features.Add((float)DigitRatio);
         features.Add(HasDosHeader ? 1.0f : 0.0f);
         features.Add(HasPeHeader ? 1.0f : 0.0f);
-        features.Add(HasElfHeader ? 1.0f : 0.0f);
-        features.Add(HasZipHeader ? 1.0f : 0.0f);
-        features.Add(HasRarHeader ? 1.0f : 0.0f);
         features.Add((float)MaxZeroByteRun);
         
         features.Add((float)ZeroByteRatio);
