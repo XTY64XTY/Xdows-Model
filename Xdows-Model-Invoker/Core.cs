@@ -52,9 +52,12 @@ namespace Xdows_Model_Invoker
         public static (bool isVirus, float probability) ScanFile(string filePath, string modelPath)
         {
             if (!File.Exists(filePath))
-                throw new FileNotFoundException("File not found", filePath);
+                throw new FileNotFoundException("找不到指定文件", filePath);
 
             var features = FeatureExtractor.ExtractFeatures(filePath);
+            if (!features.HasPeHeader)
+                throw new NotSupportedException("不支持该文件类型");
+
             var floatFeatures = features.ToFloatArray();
 
             Initialize(modelPath);
@@ -93,7 +96,7 @@ namespace Xdows_Model_Invoker
         private static (bool isVirus, float probability) PredictWithInitializedModel(float[] features)
         {
             if (_session == null)
-                throw new InvalidOperationException("ModelInvoker is not initialized. Call Initialize() before scanning.");
+                throw new InvalidOperationException("ModelInvoker 没有初始化");
 
             return RunInference(_session, features);
         }
@@ -101,12 +104,15 @@ namespace Xdows_Model_Invoker
         public static (bool isVirus, float probability) ScanFile(string filePath)
         {
             if (!File.Exists(filePath))
-                throw new FileNotFoundException("File not found", filePath);
+                throw new FileNotFoundException("找不到指定文件", filePath);
 
             if (_session == null)
-                throw new InvalidOperationException("ModelInvoker is not initialized");
+                throw new InvalidOperationException("ModelInvoker 没有初始化");
 
             var features = FeatureExtractor.ExtractFeatures(filePath);
+            if (!features.HasPeHeader)
+                throw new NotSupportedException("不支持该文件类型");
+
             var floatFeatures = features.ToFloatArray();
             return PredictWithInitializedModel(floatFeatures);
         }
