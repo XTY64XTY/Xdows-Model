@@ -109,7 +109,7 @@ public class DataLoader
             {
                 _failedCount++;
                 Console.WriteLine($"\n加载失败 {Path.GetFileName(file)}: {ex.Message}");
-                // File.Delete(file);
+                File.Delete(file);
             }
         }
     }

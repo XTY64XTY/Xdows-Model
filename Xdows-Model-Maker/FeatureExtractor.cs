@@ -5,7 +5,6 @@ public class FeatureExtractor
     public static FileFeatures ExtractFeatures(string filePath)
     {
         var features = new FileFeatures();
-        var fileInfo = new FileInfo(filePath);
 
         var bytes = File.ReadAllBytes(filePath);
 
@@ -19,7 +18,6 @@ public class FeatureExtractor
     public static async Task<FileFeatures> ExtractFeaturesAsync(string filePath)
     {
         var features = new FileFeatures();
-        var fileInfo = new FileInfo(filePath);
 
         var bytes = await File.ReadAllBytesAsync(filePath);
 
@@ -125,10 +123,10 @@ public class FeatureExtractor
                 features.HasPeHeader = true;
             }
         }
-        //if (!features.HasPeHeader)
-        //{
-        //    throw new Exception("不是PE文件");
-        //}
+        if (!features.HasPeHeader)
+        {
+            throw new Exception("不是PE文件");
+        }
         features.MaxZeroByteRun = maxZeroRun;
     }
 
@@ -243,6 +241,6 @@ public class FileFeatures
         features.Add((float)ZeroByteRatio);
         features.Add((float)HighEntropyRatio);
 
-        return features.ToArray();
+        return [.. features];
     }
 }
