@@ -127,7 +127,6 @@ public class FeatureExtractor
         }
         //if (!features.HasPeHeader)
         //{
-
         //    throw new Exception("不是PE文件");
         //}
         features.MaxZeroByteRun = maxZeroRun;
