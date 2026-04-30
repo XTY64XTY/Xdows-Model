@@ -5,6 +5,10 @@
     <RootNamespace>Xdows_Model_Invoker</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Version>2.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
+    <InformationalVersion>v2</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

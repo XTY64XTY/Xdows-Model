@@ -113,6 +113,87 @@ public class DataLoader
             }
         }
     }
+
+    public static void CleanNonPEFiles(TrainingConfig config)
+    {
+        CleanNonPEFiles(config.BlackFolder, config.WhiteFolder);
+    }
+
+    public static void CleanNonPEFiles(string blackFolder, string whiteFolder)
+    {
+        int totalDeleted = 0;
+
+        Console.WriteLine("开始清洗非PE文件...\n");
+
+        // 清洗黑文件目录
+        if (Directory.Exists(blackFolder))
+        {
+            Console.WriteLine($"正在清洗黑文件目录: {blackFolder}");
+            int deleted = CleanDirectory(blackFolder, "黑文件");
+            totalDeleted += deleted;
+        }
+        else
+        {
+            Console.WriteLine($"黑文件目录不存在: {blackFolder}");
+        }
+
+        // 清洗白文件目录
+        if (Directory.Exists(whiteFolder))
+        {
+            Console.WriteLine($"\n正在清洗白文件目录: {whiteFolder}");
+            int deleted = CleanDirectory(whiteFolder, "白文件");
+            totalDeleted += deleted;
+        }
+        else
+        {
+            Console.WriteLine($"白文件目录不存在: {whiteFolder}");
+        }
+
+        Console.WriteLine($"\n=============================================");
+        Console.WriteLine($"  清洗完成！共删除 {totalDeleted} 个非PE文件");
+        Console.WriteLine("=============================================");
+    }
+
+    private static int CleanDirectory(string folder, string folderName)
+    {
+        var files = Directory.GetFiles(folder);
+        int deletedCount = 0;
+        int totalCount = files.Length;
+
+        Console.WriteLine($"文件总数：{totalCount}");
+
+        for (int i = 0; i < files.Length; i++)
+        {
+            var file = files[i];
+            string fileName = Path.GetFileName(file);
+
+            try
+            {
+                var bytes = File.ReadAllBytes(file);
+
+                // 文件长度为64时不进行检测
+                if (bytes.Length == 64)
+                {
+                    Console.Write($"\r检查{folderName} ({i + 1}/{totalCount}) - {fileName} [跳过64字节文件]");
+                    continue;
+                }
+
+                if (!FeatureExtractor.IsPeFile(bytes))
+                    throw new Exception("不是PE文件");
+
+                Console.Write($"\r检查{folderName} ({i + 1}/{totalCount}) - {fileName}");
+            }
+            catch
+            {
+                File.Delete(file);
+                deletedCount++;
+                Console.Write($"\r已删除{folderName}非PE文件 ({deletedCount}/{totalCount}) - {fileName}");
+            }
+        }
+
+        Console.WriteLine($"\n{folderName}目录清洗完成，删除 {deletedCount} 个非PE文件");
+        return deletedCount;
+    }
 }
 
 public class FileData

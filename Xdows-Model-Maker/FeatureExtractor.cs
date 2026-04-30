@@ -112,21 +112,8 @@ public class FeatureExtractor
         features.LetterRatio = (double)letterCount / bytes.Length;
         features.DigitRatio = (double)digitCount / bytes.Length;
 
-        features.HasDosHeader = bytes.Length >= 2 && bytes[0] == 'M' && bytes[1] == 'Z';
-        features.HasPeHeader = false;
-
-        if (features.HasDosHeader && bytes.Length >= 64)
-        {
-            int peOffset = BitConverter.ToInt32(bytes, 60);
-            if (peOffset + 4 <= bytes.Length && bytes[peOffset] == 'P' && bytes[peOffset + 1] == 'E')
-            {
-                features.HasPeHeader = true;
-            }
-        }
-        if (!features.HasPeHeader)
-        {
-            throw new Exception("不是PE文件");
-        }
+        features.HasDosHeader = IsPeFile(bytes);
+        features.HasPeHeader = features.HasDosHeader;
         features.MaxZeroByteRun = maxZeroRun;
     }
 
@@ -180,6 +167,21 @@ public class FeatureExtractor
         features.MinBlockEntropy = minEntropy;
         features.MaxBlockEntropy = maxEntropy;
         features.MeanBlockEntropy = totalEntropy / numBlocks;
+    }
+
+    public static bool IsPeFile(byte[] bytes)
+    {
+        if (bytes.Length < 2 || bytes[0] != 'M' || bytes[1] != 'Z')
+            return false;
+
+        if (bytes.Length < 64)
+            return false;
+
+        int peOffset = BitConverter.ToInt32(bytes, 60);
+        if (peOffset + 4 > bytes.Length)
+            return false;
+
+        return bytes[peOffset] == 'P' && bytes[peOffset + 1] == 'E';
     }
 }
 

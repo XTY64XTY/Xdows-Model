@@ -16,6 +16,36 @@ internal class Program
         var config = new TrainingConfig();
         config.PrintConfig();
 
+        Console.WriteLine("\n请选择操作模式:");
+        Console.WriteLine("  1 - 训练模型");
+        Console.WriteLine("  2 - 清洗非PE文件");
+        Console.WriteLine("  0 - 退出");
+        Console.Write("\n请输入选项: ");
+
+        string? choice = Console.ReadLine();
+
+        switch (choice)
+        {
+            case "1":
+                TrainModel(config);
+                break;
+            case "2":
+                CleanFiles(config);
+                break;
+            case "0":
+                Console.WriteLine("退出程序。");
+                break;
+            default:
+                Console.WriteLine("无效的选项，退出程序。");
+                break;
+        }
+
+        Console.WriteLine("\n按任意键退出...");
+        Console.ReadKey();
+    }
+
+    private static void TrainModel(TrainingConfig config)
+    {
         try
         {
             var data = DataLoader.LoadData(config);
@@ -59,8 +89,18 @@ internal class Program
             Console.WriteLine($"\n发生错误: {ex.Message}");
             Console.WriteLine($"堆栈跟踪: {ex.StackTrace}");
         }
+    }
 
-        Console.WriteLine("\n按任意键退出...");
-        Console.ReadKey();
+    private static void CleanFiles(TrainingConfig config)
+    {
+        try
+        {
+            DataLoader.CleanNonPEFiles(config);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\n发生错误: {ex.Message}");
+            Console.WriteLine($"堆栈跟踪: {ex.StackTrace}");
+        }
     }
 }
