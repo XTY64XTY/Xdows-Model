@@ -8,7 +8,7 @@ public class ModelTrainer
     private readonly MLContext _mlContext;
     private IDataView? _fullDataView;
     private readonly TrainingConfig _config;
-    private const int ExpectedFeatureCount = 276;
+    private const int ExpectedFeatureCount = FileFeatures.FeatureCount;
 
     public ModelTrainer(TrainingConfig config)
     {
@@ -171,7 +171,7 @@ public class ModelTrainer
 
 public class BinaryTrainingData
 {
-    [VectorType(276)]
+    [VectorType(FileFeatures.FeatureCount)]
     public float[] Features { get; set; } = Array.Empty<float>();
 
     public bool Label { get; set; }

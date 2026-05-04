@@ -55,7 +55,8 @@ namespace Xdows_Model_Invoker
                 throw new FileNotFoundException("找不到指定文件", filePath);
 
             var features = FeatureExtractor.ExtractFeatures(filePath);
-            if (!features.HasPeHeader)
+            var fileBytes = File.ReadAllBytes(filePath);
+            if (!FeatureExtractor.IsPeFile(fileBytes))
                 throw new NotSupportedException("不支持该文件类型");
 
             var floatFeatures = features.ToFloatArray();
@@ -110,7 +111,8 @@ namespace Xdows_Model_Invoker
                 throw new InvalidOperationException("ModelInvoker 没有初始化");
 
             var features = FeatureExtractor.ExtractFeatures(filePath);
-            if (!features.HasPeHeader)
+            var fileBytes = File.ReadAllBytes(filePath);
+            if (!FeatureExtractor.IsPeFile(fileBytes))
                 throw new NotSupportedException("不支持该文件类型");
 
             var floatFeatures = features.ToFloatArray();
@@ -125,7 +127,7 @@ namespace Xdows_Model_Invoker
 
         private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features)
         {
-            var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, 276 });
+            var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, FileFeatures.FeatureCount });
             var labelTensor = new DenseTensor<bool>(new Memory<bool>(new bool[] { false }), new[] { 1, 1 });
 
             var inputs = new List<NamedOnnxValue>

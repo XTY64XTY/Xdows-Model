@@ -11,8 +11,7 @@ public class FeatureExtractor
     public static FileFeatures ExtractFeatures(string filePath)
     {
         var features = new FileFeatures();
-        var fileInfo = new FileInfo(filePath);
-        
+
         var bytes = File.ReadAllBytes(filePath);
 
         features.FileSize = bytes.Length;
@@ -25,8 +24,7 @@ public class FeatureExtractor
     public static async Task<FileFeatures> ExtractFeaturesAsync(string filePath)
     {
         var features = new FileFeatures();
-        var fileInfo = new FileInfo(filePath);
-        
+
         var bytes = await File.ReadAllBytesAsync(filePath);
 
         features.FileSize = bytes.Length;
@@ -38,6 +36,9 @@ public class FeatureExtractor
 
     private static void ExtractAllFeaturesOptimized(byte[] bytes, FileFeatures features)
     {
+        if (bytes.Length == 0)
+            return;
+
         var byteCounts = new long[256];
         int printableCount = 0;
         int controlCount = 0;
@@ -118,18 +119,6 @@ public class FeatureExtractor
         features.LetterRatio = (double)letterCount / bytes.Length;
         features.DigitRatio = (double)digitCount / bytes.Length;
 
-        features.HasDosHeader = bytes.Length >= 2 && bytes[0] == 'M' && bytes[1] == 'Z';
-        features.HasPeHeader = false;
-
-        if (features.HasDosHeader && bytes.Length >= 64)
-        {
-            int peOffset = BitConverter.ToInt32(bytes, 60);
-            if (peOffset + 4 <= bytes.Length && bytes[peOffset] == 'P' && bytes[peOffset + 1] == 'E')
-            {
-                features.HasPeHeader = true;
-            }
-        }
-
         features.MaxZeroByteRun = maxZeroRun;
     }
 
@@ -137,7 +126,7 @@ public class FeatureExtractor
     {
         const int blockSize = 256;
         int numBlocks = (bytes.Length + blockSize - 1) / blockSize;
-        
+
         if (numBlocks == 0)
         {
             features.MinBlockEntropy = 0;
@@ -184,10 +173,27 @@ public class FeatureExtractor
         features.MaxBlockEntropy = maxEntropy;
         features.MeanBlockEntropy = totalEntropy / numBlocks;
     }
+
+    public static bool IsPeFile(byte[] bytes)
+    {
+        if (bytes.Length < 2 || bytes[0] != 'M' || bytes[1] != 'Z')
+            return false;
+
+        if (bytes.Length < 64)
+            return false;
+
+        int peOffset = BitConverter.ToInt32(bytes, 60);
+        if (peOffset + 4 > bytes.Length)
+            return false;
+
+        return bytes[peOffset] == 'P' && bytes[peOffset + 1] == 'E';
+    }
 }
 
 public class FileFeatures
 {
+    public const int FeatureCount = 274;
+
     public double[] ByteFrequency { get; set; } = new double[256];
     public long FileSize { get; set; }
     public double Entropy { get; set; }
@@ -204,44 +210,40 @@ public class FileFeatures
     public double WhitespaceRatio { get; set; }
     public double LetterRatio { get; set; }
     public double DigitRatio { get; set; }
-    public bool HasDosHeader { get; set; }
-    public bool HasPeHeader { get; set; }
     public int MaxZeroByteRun { get; set; }
-    
+
     public double ZeroByteRatio { get; set; }
     public double HighEntropyRatio { get; set; }
 
     public float[] ToFloatArray()
     {
-        var features = new List<float>();
-        
-        foreach (var freq in ByteFrequency)
+        var features = new float[FeatureCount];
+        int idx = 0;
+
+        for (int i = 0; i < 256; i++)
         {
-            features.Add((float)freq);
+            features[idx++] = (float)ByteFrequency[i];
         }
-        
-        features.Add((float)FileSize);
-        features.Add((float)Entropy);
-        features.Add((float)MinBlockEntropy);
-        features.Add((float)MaxBlockEntropy);
-        features.Add((float)MeanBlockEntropy);
-        features.Add((float)UniqueBytes);
-        features.Add((float)MostCommonByte);
-        features.Add((float)MostCommonByteRatio);
-        features.Add((float)LeastCommonByte);
-        features.Add((float)LeastCommonByteRatio);
-        features.Add((float)PrintableCharRatio);
-        features.Add((float)ControlCharRatio);
-        features.Add((float)WhitespaceRatio);
-        features.Add((float)LetterRatio);
-        features.Add((float)DigitRatio);
-        features.Add(HasDosHeader ? 1.0f : 0.0f);
-        features.Add(HasPeHeader ? 1.0f : 0.0f);
-        features.Add((float)MaxZeroByteRun);
-        
-        features.Add((float)ZeroByteRatio);
-        features.Add((float)HighEntropyRatio);
-        
-        return features.ToArray();
+
+        features[idx++] = (float)Math.Log(FileSize + 1);
+        features[idx++] = (float)Entropy;
+        features[idx++] = (float)MinBlockEntropy;
+        features[idx++] = (float)MaxBlockEntropy;
+        features[idx++] = (float)MeanBlockEntropy;
+        features[idx++] = UniqueBytes;
+        features[idx++] = MostCommonByte;
+        features[idx++] = (float)MostCommonByteRatio;
+        features[idx++] = LeastCommonByte;
+        features[idx++] = (float)LeastCommonByteRatio;
+        features[idx++] = (float)PrintableCharRatio;
+        features[idx++] = (float)ControlCharRatio;
+        features[idx++] = (float)WhitespaceRatio;
+        features[idx++] = (float)LetterRatio;
+        features[idx++] = (float)DigitRatio;
+        features[idx++] = MaxZeroByteRun;
+        features[idx++] = (float)ZeroByteRatio;
+        features[idx++] = (float)HighEntropyRatio;
+
+        return features;
     }
 }

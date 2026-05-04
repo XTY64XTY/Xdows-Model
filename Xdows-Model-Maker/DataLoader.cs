@@ -203,8 +203,3 @@ public class FileData
     public bool Label { get; set; }
 }
 
-public class TrainingData
-{
-    public float[] Features { get; set; } = Array.Empty<float>();
-    public bool Label { get; set; }
-}

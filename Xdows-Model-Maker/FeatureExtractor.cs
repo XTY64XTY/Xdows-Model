@@ -30,6 +30,9 @@ public class FeatureExtractor
 
     private static void ExtractAllFeaturesOptimized(byte[] bytes, FileFeatures features)
     {
+        if (bytes.Length == 0)
+            return;
+
         var byteCounts = new long[256];
         int printableCount = 0;
         int controlCount = 0;
@@ -38,7 +41,7 @@ public class FeatureExtractor
         int digitCount = 0;
         int maxZeroRun = 0;
         int currentZeroRun = 0;
-        int highByteCount = 0;  // 0x80-0xFF
+        int highByteCount = 0;
 
         foreach (var b in bytes)
         {
@@ -87,10 +90,8 @@ public class FeatureExtractor
         features.LeastCommonByte = Array.IndexOf(byteCounts, byteCounts.Min());
         features.LeastCommonByteRatio = (double)byteCounts.Min() / bytes.Length;
 
-        // 计算零字节比例 (0x00)
         features.ZeroByteRatio = (double)byteCounts[0] / bytes.Length;
 
-        // 计算高字节比例 (0x80-0xFF)
         features.HighEntropyRatio = (double)highByteCount / bytes.Length;
 
         double entropy = 0;
@@ -112,8 +113,6 @@ public class FeatureExtractor
         features.LetterRatio = (double)letterCount / bytes.Length;
         features.DigitRatio = (double)digitCount / bytes.Length;
 
-        features.HasDosHeader = IsPeFile(bytes);
-        features.HasPeHeader = features.HasDosHeader;
         features.MaxZeroByteRun = maxZeroRun;
     }
 
@@ -187,6 +186,8 @@ public class FeatureExtractor
 
 public class FileFeatures
 {
+    public const int FeatureCount = 274;
+
     public double[] ByteFrequency { get; set; } = new double[256];
     public long FileSize { get; set; }
     public double Entropy { get; set; }
@@ -203,46 +204,40 @@ public class FileFeatures
     public double WhitespaceRatio { get; set; }
     public double LetterRatio { get; set; }
     public double DigitRatio { get; set; }
-    public bool HasDosHeader { get; set; }
-    public bool HasPeHeader { get; set; }
     public int MaxZeroByteRun { get; set; }
 
-    // 新增特征
     public double ZeroByteRatio { get; set; }
     public double HighEntropyRatio { get; set; }
 
     public float[] ToFloatArray()
     {
-        var features = new List<float>();
+        var features = new float[FeatureCount];
+        int idx = 0;
 
-        foreach (var freq in ByteFrequency)
+        for (int i = 0; i < 256; i++)
         {
-            features.Add((float)freq);
+            features[idx++] = (float)ByteFrequency[i];
         }
 
-        features.Add(FileSize);
-        features.Add((float)Entropy);
-        features.Add((float)MinBlockEntropy);
-        features.Add((float)MaxBlockEntropy);
-        features.Add((float)MeanBlockEntropy);
-        features.Add(UniqueBytes);
-        features.Add(MostCommonByte);
-        features.Add((float)MostCommonByteRatio);
-        features.Add(LeastCommonByte);
-        features.Add((float)LeastCommonByteRatio);
-        features.Add((float)PrintableCharRatio);
-        features.Add((float)ControlCharRatio);
-        features.Add((float)WhitespaceRatio);
-        features.Add((float)LetterRatio);
-        features.Add((float)DigitRatio);
-        features.Add(HasDosHeader ? 1.0f : 0.0f);
-        features.Add(HasPeHeader ? 1.0f : 0.0f);
-        features.Add(MaxZeroByteRun);
+        features[idx++] = (float)Math.Log(FileSize + 1);
+        features[idx++] = (float)Entropy;
+        features[idx++] = (float)MinBlockEntropy;
+        features[idx++] = (float)MaxBlockEntropy;
+        features[idx++] = (float)MeanBlockEntropy;
+        features[idx++] = UniqueBytes;
+        features[idx++] = MostCommonByte;
+        features[idx++] = (float)MostCommonByteRatio;
+        features[idx++] = LeastCommonByte;
+        features[idx++] = (float)LeastCommonByteRatio;
+        features[idx++] = (float)PrintableCharRatio;
+        features[idx++] = (float)ControlCharRatio;
+        features[idx++] = (float)WhitespaceRatio;
+        features[idx++] = (float)LetterRatio;
+        features[idx++] = (float)DigitRatio;
+        features[idx++] = MaxZeroByteRun;
+        features[idx++] = (float)ZeroByteRatio;
+        features[idx++] = (float)HighEntropyRatio;
 
-        // 新增特征
-        features.Add((float)ZeroByteRatio);
-        features.Add((float)HighEntropyRatio);
-
-        return [.. features];
+        return features;
     }
 }
