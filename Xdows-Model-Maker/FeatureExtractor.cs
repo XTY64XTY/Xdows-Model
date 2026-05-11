@@ -52,12 +52,13 @@ public class FeatureExtractor
                 highByteCount++;
             }
 
+            if (b == 9 || b == 10 || b == 13 || b == 32)
+                whitespaceCount++;
+
             if (b >= 32 && b <= 126)
             {
                 printableCount++;
-                if (b == 32)
-                    whitespaceCount++;
-                else if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122))
+                if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122))
                     letterCount++;
                 else if (b >= 48 && b <= 57)
                     digitCount++;
@@ -126,12 +127,22 @@ public class FeatureExtractor
             features.MinBlockEntropy = 0;
             features.MaxBlockEntropy = 0;
             features.MeanBlockEntropy = 0;
+            features.BlockEntropyVariance = 0;
+            features.MinEntropyBlockPosition = 0;
+            features.MaxEntropyBlockPosition = 0;
+            features.FirstBlockEntropy = 0;
+            features.LastBlockEntropy = 0;
             return;
         }
 
         double minEntropy = double.MaxValue;
         double maxEntropy = double.MinValue;
         double totalEntropy = 0;
+        double totalEntropySquared = 0;
+        int minEntropyBlockIdx = 0;
+        int maxEntropyBlockIdx = 0;
+        double firstBlockEntropy = 0;
+        double lastBlockEntropy = 0;
 
         var blockByteCounts = new long[256];
 
@@ -158,14 +169,35 @@ public class FeatureExtractor
                 }
             }
 
-            if (blockEntropy < minEntropy) minEntropy = blockEntropy;
-            if (blockEntropy > maxEntropy) maxEntropy = blockEntropy;
+            if (blockIdx == 0) firstBlockEntropy = blockEntropy;
+            if (blockIdx == numBlocks - 1) lastBlockEntropy = blockEntropy;
+
+            if (blockEntropy < minEntropy)
+            {
+                minEntropy = blockEntropy;
+                minEntropyBlockIdx = blockIdx;
+            }
+            if (blockEntropy > maxEntropy)
+            {
+                maxEntropy = blockEntropy;
+                maxEntropyBlockIdx = blockIdx;
+            }
             totalEntropy += blockEntropy;
+            totalEntropySquared += blockEntropy * blockEntropy;
         }
+
+        double meanEntropy = totalEntropy / numBlocks;
+        double variance = (totalEntropySquared / numBlocks) - (meanEntropy * meanEntropy);
+        if (variance < 0) variance = 0;
 
         features.MinBlockEntropy = minEntropy;
         features.MaxBlockEntropy = maxEntropy;
-        features.MeanBlockEntropy = totalEntropy / numBlocks;
+        features.MeanBlockEntropy = meanEntropy;
+        features.BlockEntropyVariance = variance;
+        features.MinEntropyBlockPosition = numBlocks > 1 ? (double)minEntropyBlockIdx / (numBlocks - 1) : 0;
+        features.MaxEntropyBlockPosition = numBlocks > 1 ? (double)maxEntropyBlockIdx / (numBlocks - 1) : 0;
+        features.FirstBlockEntropy = firstBlockEntropy;
+        features.LastBlockEntropy = lastBlockEntropy;
     }
 
     public static bool IsPeFile(byte[] bytes)
@@ -186,7 +218,7 @@ public class FeatureExtractor
 
 public class FileFeatures
 {
-    public const int FeatureCount = 274;
+    public const int FeatureCount = 279;
 
     public double[] ByteFrequency { get; set; } = new double[256];
     public long FileSize { get; set; }
@@ -194,6 +226,11 @@ public class FileFeatures
     public double MinBlockEntropy { get; set; }
     public double MaxBlockEntropy { get; set; }
     public double MeanBlockEntropy { get; set; }
+    public double BlockEntropyVariance { get; set; }
+    public double MinEntropyBlockPosition { get; set; }
+    public double MaxEntropyBlockPosition { get; set; }
+    public double FirstBlockEntropy { get; set; }
+    public double LastBlockEntropy { get; set; }
     public int UniqueBytes { get; set; }
     public int MostCommonByte { get; set; }
     public double MostCommonByteRatio { get; set; }
@@ -224,6 +261,11 @@ public class FileFeatures
         features[idx++] = (float)MinBlockEntropy;
         features[idx++] = (float)MaxBlockEntropy;
         features[idx++] = (float)MeanBlockEntropy;
+        features[idx++] = (float)BlockEntropyVariance;
+        features[idx++] = (float)MinEntropyBlockPosition;
+        features[idx++] = (float)MaxEntropyBlockPosition;
+        features[idx++] = (float)FirstBlockEntropy;
+        features[idx++] = (float)LastBlockEntropy;
         features[idx++] = UniqueBytes;
         features[idx++] = MostCommonByte;
         features[idx++] = (float)MostCommonByteRatio;
