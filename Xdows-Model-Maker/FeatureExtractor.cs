@@ -186,19 +186,30 @@ public class FeatureExtractor
         if (bytes.Length == 0)
             return features;
 
-        var byteCounts = new long[256];
-        ByteAnalysisHelper.ComputeCommonStats(bytes, byteCounts,
+        Span<long> byteCounts = stackalloc long[256];
+        ByteAnalysisHelper.ComputeCommonStatsSpan(bytes, byteCounts,
             out int printableCount, out int controlCount, out int whitespaceCount,
             out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount);
 
+        int uniqueBytes = 0;
+        long maxCount = 0, minCount = long.MaxValue;
+        int mostCommonByte = 0, leastCommonByte = 0;
+
         for (int i = 0; i < 256; i++)
+        {
             features.ByteFrequency[i] = (double)byteCounts[i] / bytes.Length;
 
-        features.UniqueBytes = byteCounts.Count(c => c > 0);
-        features.MostCommonByte = Array.IndexOf(byteCounts, byteCounts.Max());
-        features.MostCommonByteRatio = (double)byteCounts.Max() / bytes.Length;
-        features.LeastCommonByte = Array.IndexOf(byteCounts, byteCounts.Min());
-        features.LeastCommonByteRatio = (double)byteCounts.Min() / bytes.Length;
+            long c = byteCounts[i];
+            if (c > 0) uniqueBytes++;
+            if (c > maxCount) { maxCount = c; mostCommonByte = i; }
+            if (c < minCount) { minCount = c; leastCommonByte = i; }
+        }
+
+        features.UniqueBytes = uniqueBytes;
+        features.MostCommonByte = mostCommonByte;
+        features.MostCommonByteRatio = (double)maxCount / bytes.Length;
+        features.LeastCommonByte = leastCommonByte;
+        features.LeastCommonByteRatio = (double)minCount / bytes.Length;
         features.ZeroByteRatio = (double)byteCounts[0] / bytes.Length;
         features.HighEntropyRatio = (double)highByteCount / bytes.Length;
         features.Entropy = ByteAnalysisHelper.ComputeEntropy(byteCounts, bytes.Length);
@@ -250,7 +261,7 @@ public class FeatureExtractor
             int end = Math.Min(start + blockSize, bytes.Length);
             int currentBlockSize = end - start;
 
-            Array.Clear(blockByteCounts, 0, 256);
+            blockByteCounts.AsSpan().Clear();
 
             for (int i = start; i < end; i++)
                 blockByteCounts[bytes[i]]++;

@@ -66,17 +66,14 @@ namespace Xdows_Model_Invoker
         }
 
         public static (bool isVirus, float probability) ScanFileFlash(string filePath, string modelPath)
-        {
-            if (!File.Exists(filePath))
-                throw new FileNotFoundException("找不到指定文件", filePath);
+    {
+        if (!File.Exists(filePath))
+            throw new FileNotFoundException("找不到指定文件", filePath);
 
-            if (!FlashFeatureExtractor.IsPeFileFromPath(filePath))
-                throw new NotSupportedException("不支持该文件类型");
-
-            var features = FlashFeatureExtractor.ExtractFeatures(filePath);
-            InitializeFlash(modelPath);
-            return PredictWithInitializedModel(features.ToFloatArray());
-        }
+        var features = FlashFeatureExtractor.ExtractFeatures(filePath);
+        InitializeFlash(modelPath);
+        return PredictWithInitializedModel(features.ToFloatArray());
+    }
 
         public static void Initialize(string? modelPath = null)
         {
@@ -137,9 +134,6 @@ namespace Xdows_Model_Invoker
 
             if (_isFlashMode)
             {
-                if (!FlashFeatureExtractor.IsPeFileFromPath(filePath))
-                    throw new NotSupportedException("不支持该文件类型");
-
                 var flashFeatures = FlashFeatureExtractor.ExtractFeatures(filePath);
                 floatFeatures = flashFeatures.ToFloatArray();
             }
