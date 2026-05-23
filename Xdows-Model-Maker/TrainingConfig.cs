@@ -6,6 +6,8 @@ public class TrainingConfig
     public string WhiteFolder { get; set; } = @"D:\Code\Model\Files\White";
     public string ModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model.zip");
     public string OnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model.onnx");
+    public string FlashModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Flash.zip");
+    public string FlashOnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Flash.onnx");
 
     public double LearningRate { get; set; } = 0.1;
     public int NumberOfLeaves { get; set; } = 31;
@@ -20,6 +22,8 @@ public class TrainingConfig
         Console.WriteLine($"白文件目录: {WhiteFolder}");
         Console.WriteLine($"ML.NET 模型路径: {ModelPath}");
         Console.WriteLine($"ONNX 模型路径: {OnnxPath}");
+        Console.WriteLine($"Flash ML.NET 模型路径: {FlashModelPath}");
+        Console.WriteLine($"Flash ONNX 模型路径: {FlashOnnxPath}");
         Console.WriteLine($"\n学习率 (Learning Rate): {LearningRate}");
         Console.WriteLine($"叶子数 (Number of Leaves): {NumberOfLeaves}");
         Console.WriteLine($"最小叶节点样本数: {MinimumExampleCountPerLeaf}");

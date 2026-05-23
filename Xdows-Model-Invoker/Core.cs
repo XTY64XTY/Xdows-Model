@@ -7,21 +7,23 @@ namespace Xdows_Model_Invoker
     public static class ModelInvoker
     {
         private const string DefaultModelFileName = "Xdows-Model.onnx";
+        private const string DefaultFlashModelFileName = "Xdows-Model-Flash.onnx";
         private static readonly object _initLock = new();
-        private static SessionOptions? _sessionOptions;
         private static InferenceSession? _session;
         private static string? _loadedModelPath;
-        private static string EnsureModelAvailable()
+        private static bool _isFlashMode;
+
+        private static string EnsureModelAvailable(string fileName)
         {
             string baseDir = AppContext.BaseDirectory;
-            string destPath = Path.Combine(baseDir, DefaultModelFileName);
+            string destPath = Path.Combine(baseDir, fileName);
 
             if (File.Exists(destPath))
                 return destPath;
 
             var asm = Assembly.GetExecutingAssembly();
 
-            var resourceName = asm.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith(DefaultModelFileName, StringComparison.OrdinalIgnoreCase));
+            var resourceName = asm.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith(fileName, StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrEmpty(resourceName))
             {
                 using var rs = asm.GetManifestResourceStream(resourceName);
@@ -33,20 +35,20 @@ namespace Xdows_Model_Invoker
                 }
             }
             var asmDir = Path.GetDirectoryName(asm.Location) ?? baseDir;
-            var candidate = Path.Combine(asmDir, DefaultModelFileName);
+            var candidate = Path.Combine(asmDir, fileName);
             if (File.Exists(candidate))
             {
                 File.Copy(candidate, destPath, overwrite: true);
                 return destPath;
             }
 
-            throw new FileNotFoundException("Model file not found. Expected to find '" + DefaultModelFileName + "' as an embedded resource or next to the Invoker assembly.", DefaultModelFileName);
+            throw new FileNotFoundException($"Model file not found. Expected to find '{fileName}' as an embedded resource or next to the Invoker assembly.", fileName);
         }
 
         public static (bool isVirus, float probability) PredictWithMlNet(string modelPath, float[] features)
         {
-            using var session = CreateSession(modelPath);
-            return RunInference(session, features);
+            using var session = new InferenceSession(modelPath);
+            return RunInference(session, features, FileFeatures.FeatureCount);
         }
 
         public static (bool isVirus, float probability) ScanFile(string filePath, string modelPath)
@@ -54,52 +56,73 @@ namespace Xdows_Model_Invoker
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("找不到指定文件", filePath);
 
-            var features = FeatureExtractor.ExtractFeatures(filePath);
             var fileBytes = File.ReadAllBytes(filePath);
             if (!FeatureExtractor.IsPeFile(fileBytes))
                 throw new NotSupportedException("不支持该文件类型");
 
-            var floatFeatures = features.ToFloatArray();
-
+            var features = FeatureExtractor.ExtractFromBytes(fileBytes);
             Initialize(modelPath);
-            return PredictWithInitializedModel(floatFeatures);
+            return PredictWithInitializedModel(features.ToFloatArray());
         }
+
+        public static (bool isVirus, float probability) ScanFileFlash(string filePath, string modelPath)
+        {
+            if (!File.Exists(filePath))
+                throw new FileNotFoundException("找不到指定文件", filePath);
+
+            if (!FlashFeatureExtractor.IsPeFileFromPath(filePath))
+                throw new NotSupportedException("不支持该文件类型");
+
+            var features = FlashFeatureExtractor.ExtractFeatures(filePath);
+            InitializeFlash(modelPath);
+            return PredictWithInitializedModel(features.ToFloatArray());
+        }
+
         public static void Initialize(string? modelPath = null)
+        {
+            InitializeCore(modelPath ?? EnsureModelAvailable(DefaultModelFileName), flashMode: false);
+        }
+
+        public static void InitializeFlash(string? modelPath = null)
+        {
+            InitializeCore(modelPath ?? EnsureModelAvailable(DefaultFlashModelFileName), flashMode: true);
+        }
+
+        private static void InitializeCore(string path, bool flashMode)
         {
             lock (_initLock)
             {
-                if (_session != null && _loadedModelPath == modelPath)
+                if (_session != null && _loadedModelPath == path && _isFlashMode == flashMode)
                     return;
 
-                string path = modelPath ?? EnsureModelAvailable();
-
                 _session?.Dispose();
-                _sessionOptions?.Dispose();
-
-                _sessionOptions = new SessionOptions();
-                _session = CreateSession(path);
+                _session = new InferenceSession(path);
                 _loadedModelPath = path;
+                _isFlashMode = flashMode;
             }
         }
 
         public static bool IsInitialized => _session != null;
+        public static bool IsFlashMode => _isFlashMode;
+
         public static void UnloadModel()
         {
             lock (_initLock)
             {
                 _session?.Dispose();
                 _session = null;
-                _sessionOptions?.Dispose();
-                _sessionOptions = null;
                 _loadedModelPath = null;
+                _isFlashMode = false;
             }
         }
+
         private static (bool isVirus, float probability) PredictWithInitializedModel(float[] features)
         {
             if (_session == null)
                 throw new InvalidOperationException("ModelInvoker 没有初始化");
 
-            return RunInference(_session, features);
+            int featureCount = _isFlashMode ? FlashFileFeatures.FeatureCount : FileFeatures.FeatureCount;
+            return RunInference(_session, features, featureCount);
         }
 
         public static (bool isVirus, float probability) ScanFile(string filePath)
@@ -110,24 +133,32 @@ namespace Xdows_Model_Invoker
             if (_session == null)
                 throw new InvalidOperationException("ModelInvoker 没有初始化");
 
-            var features = FeatureExtractor.ExtractFeatures(filePath);
-            var fileBytes = File.ReadAllBytes(filePath);
-            if (!FeatureExtractor.IsPeFile(fileBytes))
-                throw new NotSupportedException("不支持该文件类型");
+            float[] floatFeatures;
 
-            var floatFeatures = features.ToFloatArray();
+            if (_isFlashMode)
+            {
+                if (!FlashFeatureExtractor.IsPeFileFromPath(filePath))
+                    throw new NotSupportedException("不支持该文件类型");
+
+                var flashFeatures = FlashFeatureExtractor.ExtractFeatures(filePath);
+                floatFeatures = flashFeatures.ToFloatArray();
+            }
+            else
+            {
+                var fileBytes = File.ReadAllBytes(filePath);
+                if (!FeatureExtractor.IsPeFile(fileBytes))
+                    throw new NotSupportedException("不支持该文件类型");
+
+                var features = FeatureExtractor.ExtractFromBytes(fileBytes);
+                floatFeatures = features.ToFloatArray();
+            }
+
             return PredictWithInitializedModel(floatFeatures);
         }
 
-        private static InferenceSession CreateSession(string modelPath)
+        private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features, int featureCount)
         {
-            var options = new SessionOptions();
-            return new InferenceSession(modelPath, options);
-        }
-
-        private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features)
-        {
-            var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, FileFeatures.FeatureCount });
+            var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, featureCount });
             var labelTensor = new DenseTensor<bool>(new Memory<bool>(new bool[] { false }), new[] { 1, 1 });
 
             var inputs = new List<NamedOnnxValue>
@@ -138,7 +169,6 @@ namespace Xdows_Model_Invoker
 
             using var results = session.Run(inputs);
 
-            var predictedLabelOutput = results.FirstOrDefault(r => r.Name == "PredictedLabel.output");
             var probabilityOutput = results.FirstOrDefault(r => r.Name == "Probability.output");
 
             bool isVirus = false;

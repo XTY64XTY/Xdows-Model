@@ -3,21 +3,34 @@ using System.Diagnostics;
 
 namespace Xdows_Model_Maker;
 
+public enum DataLoadMode
+{
+    Standard,
+    FlashOnly,
+    Both
+}
+
 public class DataLoader
 {
     private static int _loadedCount;
     private static int _failedCount;
     private static readonly object _lockObject = new();
-    private static int _lastReportedCount;
     private static Stopwatch? _loadingStopwatch;
+    private static DataLoadMode _currentMode;
 
     public static List<FileData> LoadData(TrainingConfig config)
     {
         return LoadData(config.BlackFolder, config.WhiteFolder);
     }
 
-    public static List<FileData> LoadData(string blackFolder, string whiteFolder, bool enableParallelLoading = true, int maxParallelism = -1)
+    public static List<FileData> LoadData(TrainingConfig config, DataLoadMode mode)
     {
+        return LoadData(config.BlackFolder, config.WhiteFolder, mode: mode);
+    }
+
+    public static List<FileData> LoadData(string blackFolder, string whiteFolder, bool enableParallelLoading = true, DataLoadMode mode = DataLoadMode.Both)
+    {
+        _currentMode = mode;
         var data = new List<FileData>();
 
         Console.WriteLine($"正在加载黑文件: {blackFolder}");
@@ -26,7 +39,6 @@ public class DataLoader
             var blackFiles = Directory.GetFiles(blackFolder);
             _loadedCount = 0;
             _failedCount = 0;
-            _lastReportedCount = 0;
             var blackData = LoadFilesParallelAsync(blackFiles, true, enableParallelLoading).GetAwaiter().GetResult();
             data.AddRange(blackData);
             Console.WriteLine($"\n黑文件加载完成，成功 {_loadedCount} 个，失败 {_failedCount} 个");
@@ -42,7 +54,6 @@ public class DataLoader
             var whiteFiles = Directory.GetFiles(whiteFolder);
             _loadedCount = 0;
             _failedCount = 0;
-            _lastReportedCount = 0;
             var whiteData = LoadFilesParallelAsync(whiteFiles, false, enableParallelLoading).GetAwaiter().GetResult();
             data.AddRange(whiteData);
             Console.WriteLine($"\n白文件加载完成，成功 {_loadedCount} 个，失败 {_failedCount} 个");
@@ -60,7 +71,6 @@ public class DataLoader
     {
         var results = new ConcurrentBag<FileData>();
         int totalFiles = files.Length;
-
 
         Console.WriteLine($"文件总数：{files.Length}");
 
@@ -85,21 +95,35 @@ public class DataLoader
     {
         try
         {
-            var features = await FeatureExtractor.ExtractFeaturesAsync(file);
-            results.Add(new FileData
+            var bytes = await File.ReadAllBytesAsync(file);
+
+            var fileData = new FileData
             {
                 FilePath = file,
-                Features = features,
                 Label = isBlack
-            });
+            };
+
+            switch (_currentMode)
+            {
+                case DataLoadMode.FlashOnly:
+                    fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                    break;
+                case DataLoadMode.Standard:
+                    fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
+                    break;
+                case DataLoadMode.Both:
+                default:
+                    fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
+                    fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                    break;
+            }
+
+            results.Add(fileData);
 
             lock (_lockObject)
             {
                 _loadedCount++;
-
-                _lastReportedCount = _loadedCount;
                 string label = isBlack ? "黑文件" : "白文件";
-
                 Console.Write($"\r已加载{label} ({_loadedCount}/{totalFiles})");
             }
         }
@@ -109,7 +133,6 @@ public class DataLoader
             {
                 _failedCount++;
                 Console.WriteLine($"\n加载失败 {Path.GetFileName(file)}: {ex.Message}");
-                File.Delete(file);
             }
         }
     }
@@ -125,7 +148,6 @@ public class DataLoader
 
         Console.WriteLine("开始清洗非PE文件...\n");
 
-        // 清洗黑文件目录
         if (Directory.Exists(blackFolder))
         {
             Console.WriteLine($"正在清洗黑文件目录: {blackFolder}");
@@ -137,7 +159,6 @@ public class DataLoader
             Console.WriteLine($"黑文件目录不存在: {blackFolder}");
         }
 
-        // 清洗白文件目录
         if (Directory.Exists(whiteFolder))
         {
             Console.WriteLine($"\n正在清洗白文件目录: {whiteFolder}");
@@ -171,7 +192,6 @@ public class DataLoader
             {
                 var bytes = File.ReadAllBytes(file);
 
-                // 文件长度为64时不进行检测
                 if (bytes.Length == 64)
                 {
                     Console.Write($"\r检查{folderName} ({i + 1}/{totalCount}) - {fileName} [跳过64字节文件]");
@@ -195,11 +215,3 @@ public class DataLoader
         return deletedCount;
     }
 }
-
-public class FileData
-{
-    public string FilePath { get; set; } = string.Empty;
-    public FileFeatures Features { get; set; } = new FileFeatures();
-    public bool Label { get; set; }
-}
-
