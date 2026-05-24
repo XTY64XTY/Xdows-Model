@@ -76,7 +76,7 @@ internal class Program
             var trainer = new ModelTrainer(config);
             var testSamples = data.Take(Math.Min(5, data.Count)).ToList();
 
-            if (mode == DataLoadMode.Standard || mode == DataLoadMode.Both)
+            if (mode == DataLoadMode.Standard || mode == DataLoadMode.Both || mode == DataLoadMode.All)
             {
                 Console.WriteLine("\n=============================================");
                 Console.WriteLine("  开始训练标准模型...");

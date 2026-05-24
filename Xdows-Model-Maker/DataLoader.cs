@@ -120,13 +120,6 @@ public class DataLoader
                     }
                     break;
                 case DataLoadMode.Both:
-                default:
-                    {
-                        var bytes = await File.ReadAllBytesAsync(file);
-                        fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
-                        fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
-                    }
-                    break;
                 case DataLoadMode.All:
                     {
                         var bytes = await File.ReadAllBytesAsync(file);
