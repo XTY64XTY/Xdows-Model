@@ -4,14 +4,23 @@ using System.Reflection;
 
 namespace Xdows_Model_Invoker
 {
+    public enum ModelMode
+    {
+        Standard,
+        Flash,
+        Pro
+    }
+
     public static class ModelInvoker
     {
         private const string DefaultModelFileName = "Xdows-Model.onnx";
         private const string DefaultFlashModelFileName = "Xdows-Model-Flash.onnx";
+        private const string DefaultProModelFileName = "Xdows-Model-Pro.onnx";
         private static readonly object _initLock = new();
         private static InferenceSession? _session;
         private static string? _loadedModelPath;
-        private static bool _isFlashMode;
+        private static ModelMode _mode = ModelMode.Standard;
+        private static int? _proFeatureDimension;
 
         private static string EnsureModelAvailable(string fileName)
         {
@@ -66,41 +75,61 @@ namespace Xdows_Model_Invoker
         }
 
         public static (bool isVirus, float probability) ScanFileFlash(string filePath, string modelPath)
-    {
-        if (!File.Exists(filePath))
-            throw new FileNotFoundException("找不到指定文件", filePath);
+        {
+            if (!File.Exists(filePath))
+                throw new FileNotFoundException("找不到指定文件", filePath);
 
-        var features = FlashFeatureExtractor.ExtractFeatures(filePath);
-        InitializeFlash(modelPath);
-        return PredictWithInitializedModel(features.ToFloatArray());
-    }
+            var features = FlashFeatureExtractor.ExtractFeatures(filePath);
+            InitializeFlash(modelPath);
+            return PredictWithInitializedModel(features.ToFloatArray());
+        }
+
+        public static (bool isVirus, float probability) ScanFilePro(string filePath, string modelPath)
+        {
+            if (!File.Exists(filePath))
+                throw new FileNotFoundException("找不到指定文件", filePath);
+
+            InitializePro(modelPath);
+
+            int featureCount = GetProFeatureDimension();
+            var proFeatures = ProFeatureExtractor.ExtractFeatures(filePath, featureCount / ProFileFeatures.SectionCount);
+            return PredictWithInitializedModel(proFeatures.ToFloatArray());
+        }
 
         public static void Initialize(string? modelPath = null)
         {
-            InitializeCore(modelPath ?? EnsureModelAvailable(DefaultModelFileName), flashMode: false);
+            InitializeCore(modelPath ?? EnsureModelAvailable(DefaultModelFileName), ModelMode.Standard);
         }
 
         public static void InitializeFlash(string? modelPath = null)
         {
-            InitializeCore(modelPath ?? EnsureModelAvailable(DefaultFlashModelFileName), flashMode: true);
+            InitializeCore(modelPath ?? EnsureModelAvailable(DefaultFlashModelFileName), ModelMode.Flash);
         }
 
-        private static void InitializeCore(string path, bool flashMode)
+        public static void InitializePro(string? modelPath = null)
+        {
+            InitializeCore(modelPath ?? EnsureModelAvailable(DefaultProModelFileName), ModelMode.Pro);
+        }
+
+        private static void InitializeCore(string path, ModelMode mode)
         {
             lock (_initLock)
             {
-                if (_session != null && _loadedModelPath == path && _isFlashMode == flashMode)
+                if (_session != null && _loadedModelPath == path && _mode == mode)
                     return;
 
                 _session?.Dispose();
                 _session = new InferenceSession(path);
                 _loadedModelPath = path;
-                _isFlashMode = flashMode;
+                _mode = mode;
+                _proFeatureDimension = null;
             }
         }
 
         public static bool IsInitialized => _session != null;
-        public static bool IsFlashMode => _isFlashMode;
+        public static bool IsFlashMode => _mode == ModelMode.Flash;
+        public static bool IsProMode => _mode == ModelMode.Pro;
+        public static ModelMode CurrentMode => _mode;
 
         public static void UnloadModel()
         {
@@ -109,8 +138,36 @@ namespace Xdows_Model_Invoker
                 _session?.Dispose();
                 _session = null;
                 _loadedModelPath = null;
-                _isFlashMode = false;
+                _mode = ModelMode.Standard;
+                _proFeatureDimension = null;
             }
+        }
+
+        private static int GetProFeatureDimension()
+        {
+            if (_proFeatureDimension.HasValue)
+                return _proFeatureDimension.Value;
+
+            if (_session == null)
+                throw new InvalidOperationException("ModelInvoker 没有初始化");
+
+            var inputMeta = _session.InputMetadata;
+            if (inputMeta.TryGetValue("Features", out var nodeMeta))
+            {
+                var dims = nodeMeta.Dimensions;
+                if (dims.Length == 2 && dims[1] > 0)
+                {
+                    _proFeatureDimension = dims[1];
+                    return dims[1];
+                }
+                if (dims.Length == 1 && dims[0] > 0)
+                {
+                    _proFeatureDimension = dims[0];
+                    return dims[0];
+                }
+            }
+
+            throw new InvalidOperationException("无法从 ONNX 模型元数据中读取 Pro 模型特征维度");
         }
 
         private static (bool isVirus, float probability) PredictWithInitializedModel(float[] features)
@@ -118,7 +175,13 @@ namespace Xdows_Model_Invoker
             if (_session == null)
                 throw new InvalidOperationException("ModelInvoker 没有初始化");
 
-            int featureCount = _isFlashMode ? FlashFileFeatures.FeatureCount : FileFeatures.FeatureCount;
+            int featureCount = _mode switch
+            {
+                ModelMode.Flash => FlashFileFeatures.FeatureCount,
+                ModelMode.Pro => GetProFeatureDimension(),
+                _ => FileFeatures.FeatureCount
+            };
+
             return RunInference(_session, features, featureCount);
         }
 
@@ -132,19 +195,25 @@ namespace Xdows_Model_Invoker
 
             float[] floatFeatures;
 
-            if (_isFlashMode)
+            switch (_mode)
             {
-                var flashFeatures = FlashFeatureExtractor.ExtractFeatures(filePath);
-                floatFeatures = flashFeatures.ToFloatArray();
-            }
-            else
-            {
-                var fileBytes = File.ReadAllBytes(filePath);
-                if (!FeatureExtractor.IsPeFile(fileBytes))
-                    throw new NotSupportedException("不支持该文件类型");
+                case ModelMode.Flash:
+                    var flashFeatures = FlashFeatureExtractor.ExtractFeatures(filePath);
+                    floatFeatures = flashFeatures.ToFloatArray();
+                    break;
+                case ModelMode.Pro:
+                    int featureCount = GetProFeatureDimension();
+                    var proFeatures = ProFeatureExtractor.ExtractFeatures(filePath, featureCount / ProFileFeatures.SectionCount);
+                    floatFeatures = proFeatures.ToFloatArray();
+                    break;
+                default:
+                    var fileBytes = File.ReadAllBytes(filePath);
+                    if (!FeatureExtractor.IsPeFile(fileBytes))
+                        throw new NotSupportedException("不支持该文件类型");
 
-                var features = FeatureExtractor.ExtractFromBytes(fileBytes);
-                floatFeatures = features.ToFloatArray();
+                    var features = FeatureExtractor.ExtractFromBytes(fileBytes);
+                    floatFeatures = features.ToFloatArray();
+                    break;
             }
 
             return PredictWithInitializedModel(floatFeatures);

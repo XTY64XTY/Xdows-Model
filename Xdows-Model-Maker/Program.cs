@@ -20,7 +20,10 @@ internal class Program
         Console.WriteLine("  1 - 训练标准模型");
         Console.WriteLine("  2 - 训练 Flash 模型");
         Console.WriteLine("  3 - 同时训练标准模型和 Flash 模型");
-        Console.WriteLine("  4 - 清洗非PE文件");
+        Console.WriteLine("  4 - 训练 Pro 模型");
+        Console.WriteLine("  5 - 同时训练所有模型（标准 + Flash + Pro）");
+        Console.WriteLine("  6 - 清洗非PE文件");
+        Console.WriteLine("  7 - 清洗非PE文件（含Pro兼容性检查）");
         Console.WriteLine("  0 - 退出");
         Console.Write("\n请输入选项: ");
 
@@ -38,7 +41,16 @@ internal class Program
                 TrainAndEvaluate(config, DataLoadMode.Both);
                 break;
             case "4":
+                TrainAndEvaluate(config, DataLoadMode.ProOnly);
+                break;
+            case "5":
+                TrainAndEvaluate(config, DataLoadMode.All);
+                break;
+            case "6":
                 CleanFiles(config);
+                break;
+            case "7":
+                CleanFilesForPro(config);
                 break;
             case "0":
                 Console.WriteLine("退出程序。");
@@ -82,7 +94,7 @@ internal class Program
                 Console.WriteLine("=============================================");
             }
 
-            if (mode == DataLoadMode.FlashOnly || mode == DataLoadMode.Both)
+            if (mode == DataLoadMode.FlashOnly || mode == DataLoadMode.Both || mode == DataLoadMode.All)
             {
                 Console.WriteLine("\n=============================================");
                 Console.WriteLine("  开始训练 Flash 模型...");
@@ -100,7 +112,34 @@ internal class Program
                 Console.WriteLine("=============================================");
             }
 
-            if (mode == DataLoadMode.Both)
+            if (mode == DataLoadMode.ProOnly || mode == DataLoadMode.All)
+            {
+                Console.WriteLine("\n=============================================");
+                Console.WriteLine("  开始训练 Pro 模型...");
+                Console.WriteLine("=============================================");
+                var (proModel, optimalBytesPerSection) = trainer.TrainProModel(data);
+
+                if (proModel == null)
+                {
+                    Console.WriteLine("\nPro 模型训练失败，跳过预测测试。");
+                }
+                else
+                {
+                    Console.WriteLine("\n对部分样本进行 Pro 预测测试:");
+                    foreach (var sample in testSamples)
+                        trainer.PredictPro(proModel, sample, optimalBytesPerSection);
+                }
+
+                Console.WriteLine("\n=============================================");
+                Console.WriteLine("  Pro 模型训练完成！");
+                Console.WriteLine($"  Pro ML.NET 模型已保存至: {config.ProModelPath}");
+                Console.WriteLine($"  Pro ONNX 模型已保存至: {config.ProOnnxPath}");
+                Console.WriteLine($"  最优每段字节数: {optimalBytesPerSection}");
+                Console.WriteLine($"  最优特征维度: {ProFileFeatures.SectionCount * optimalBytesPerSection}");
+                Console.WriteLine("=============================================");
+            }
+
+            if (mode == DataLoadMode.Both || mode == DataLoadMode.All)
             {
                 Console.WriteLine("\n*********************************************");
                 Console.WriteLine("  所有模型训练完成！");
@@ -142,6 +181,19 @@ internal class Program
         try
         {
             DataLoader.CleanNonPEFiles(config);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\n发生错误: {ex.Message}");
+            Console.WriteLine($"堆栈跟踪: {ex.StackTrace}");
+        }
+    }
+
+    private static void CleanFilesForPro(TrainingConfig config)
+    {
+        try
+        {
+            DataLoader.CleanNonPEFiles(config, proCheck: true);
         }
         catch (Exception ex)
         {

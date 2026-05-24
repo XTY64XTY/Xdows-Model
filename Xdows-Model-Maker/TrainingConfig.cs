@@ -8,6 +8,14 @@ public class TrainingConfig
     public string OnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model.onnx");
     public string FlashModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Flash.zip");
     public string FlashOnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Flash.onnx");
+    public string ProModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Pro.zip");
+    public string ProOnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Pro.onnx");
+
+    public int ProExpansionStartBytesPerSection { get; set; } = 512;
+    public int ProExpansionFactor { get; set; } = 2;
+    public int ProExpansionMaxBytesPerSection { get; set; } = 4096;
+    public double ProExpansionAucThreshold { get; set; } = 0.001;
+    public int ProExpansionPatience { get; set; } = 2;
 
     public double LearningRate { get; set; } = 0.1;
     public int NumberOfLeaves { get; set; } = 31;
@@ -24,6 +32,13 @@ public class TrainingConfig
         Console.WriteLine($"ONNX 模型路径: {OnnxPath}");
         Console.WriteLine($"Flash ML.NET 模型路径: {FlashModelPath}");
         Console.WriteLine($"Flash ONNX 模型路径: {FlashOnnxPath}");
+        Console.WriteLine($"Pro ML.NET 模型路径: {ProModelPath}");
+        Console.WriteLine($"Pro ONNX 模型路径: {ProOnnxPath}");
+        Console.WriteLine($"\nPro 渐进式扩展起始字节/段: {ProExpansionStartBytesPerSection}");
+        Console.WriteLine($"Pro 渐进式扩展因子: {ProExpansionFactor}");
+        Console.WriteLine($"Pro 渐进式扩展最大字节/段: {ProExpansionMaxBytesPerSection}");
+        Console.WriteLine($"Pro 渐进式扩展 AUC 阈值: {ProExpansionAucThreshold}");
+        Console.WriteLine($"Pro 渐进式扩展耐心步数: {ProExpansionPatience}");
         Console.WriteLine($"\n学习率 (Learning Rate): {LearningRate}");
         Console.WriteLine($"叶子数 (Number of Leaves): {NumberOfLeaves}");
         Console.WriteLine($"最小叶节点样本数: {MinimumExampleCountPerLeaf}");

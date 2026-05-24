@@ -103,7 +103,8 @@ internal static class ByteAnalysisHelper
 
     public static void ComputeCommonStatsSpan(ReadOnlySpan<byte> bytes, Span<long> byteCounts,
         out int printableCount, out int controlCount, out int whitespaceCount,
-        out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount)
+        out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount,
+        out int zeroRunCount, out long totalZeroRunLength)
     {
         printableCount = 0;
         controlCount = 0;
@@ -112,6 +113,8 @@ internal static class ByteAnalysisHelper
         digitCount = 0;
         maxZeroRun = 0;
         highByteCount = 0;
+        zeroRunCount = 0;
+        totalZeroRunLength = 0;
         int currentZeroRun = 0;
 
         for (int i = 0; i < bytes.Length; i++)
@@ -146,8 +149,19 @@ internal static class ByteAnalysisHelper
             }
             else
             {
+                if (currentZeroRun > 0)
+                {
+                    zeroRunCount++;
+                    totalZeroRunLength += currentZeroRun;
+                }
                 currentZeroRun = 0;
             }
+        }
+
+        if (currentZeroRun > 0)
+        {
+            zeroRunCount++;
+            totalZeroRunLength += currentZeroRun;
         }
     }
 
@@ -181,6 +195,45 @@ internal static class ByteAnalysisHelper
         mostCommonByteRatio = (double)maxCount / totalBytes;
         zeroByteRatio = (double)byteCounts[0] / totalBytes;
     }
+
+    public static void ComputeByteMoments(Span<long> byteCounts, int totalBytes,
+        out double mean, out double variance, out double skewness, out double kurtosis)
+    {
+        mean = 0;
+        for (int i = 0; i < 256; i++)
+            mean += i * (double)byteCounts[i] / totalBytes;
+
+        variance = 0;
+        double m3 = 0;
+        double m4 = 0;
+        for (int i = 0; i < 256; i++)
+        {
+            double p = (double)byteCounts[i] / totalBytes;
+            double diff = i - mean;
+            double diff2 = diff * diff;
+            variance += diff2 * p;
+            m3 += diff2 * diff * p;
+            m4 += diff2 * diff2 * p;
+        }
+
+        double stdDev = Math.Sqrt(variance);
+        skewness = stdDev > 0 ? m3 / (stdDev * stdDev * stdDev) : 0;
+        kurtosis = variance > 0 ? m4 / (variance * variance) - 3 : 0;
+    }
+
+    public static double ComputeRegionEntropy(ReadOnlySpan<byte> bytes, int start, int length)
+    {
+        int actualLength = Math.Min(length, bytes.Length - start);
+        if (actualLength <= 0) return 0;
+
+        Span<long> counts = stackalloc long[256];
+        counts.Clear();
+
+        for (int i = start; i < start + actualLength; i++)
+            counts[bytes[i]]++;
+
+        return ComputeEntropy(counts, actualLength);
+    }
 }
 
 public class FeatureExtractor
@@ -207,7 +260,8 @@ public class FeatureExtractor
         Span<long> byteCounts = stackalloc long[256];
         ByteAnalysisHelper.ComputeCommonStatsSpan(bytes, byteCounts,
             out int printableCount, out int controlCount, out int whitespaceCount,
-            out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount);
+            out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount,
+            out _, out _);
 
         int uniqueBytes = 0;
         long maxCount = 0, minCount = long.MaxValue;
@@ -322,7 +376,7 @@ public class FeatureExtractor
 
 public class FlashFileFeatures
 {
-    public const int FeatureCount = 12;
+    public const int FeatureCount = 20;
 
     public long FileSize { get; set; }
     public double Entropy { get; set; }
@@ -336,6 +390,14 @@ public class FlashFileFeatures
     public int UniqueBytes { get; set; }
     public double MostCommonByteRatio { get; set; }
     public int MaxZeroByteRun { get; set; }
+    public double MeanByteValue { get; set; }
+    public double ByteValueVariance { get; set; }
+    public double ByteDistributionSkewness { get; set; }
+    public double ByteDistributionKurtosis { get; set; }
+    public double MeanZeroRunLength { get; set; }
+    public int ZeroRunCount { get; set; }
+    public double HeadBlockEntropy { get; set; }
+    public double TailBlockEntropy { get; set; }
 
     public float[] ToFloatArray()
     {
@@ -352,7 +414,15 @@ public class FlashFileFeatures
             (float)DigitRatio,
             UniqueBytes,
             (float)MostCommonByteRatio,
-            MaxZeroByteRun
+            MaxZeroByteRun,
+            (float)MeanByteValue,
+            (float)ByteValueVariance,
+            (float)ByteDistributionSkewness,
+            (float)ByteDistributionKurtosis,
+            (float)MeanZeroRunLength,
+            ZeroRunCount,
+            (float)HeadBlockEntropy,
+            (float)TailBlockEntropy
         };
     }
 }
@@ -438,10 +508,15 @@ public class FlashFeatureExtractor
 
         ByteAnalysisHelper.ComputeCommonStatsSpan(bytes, byteCounts,
             out int printableCount, out int controlCount, out int whitespaceCount,
-            out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount);
+            out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount,
+            out int zeroRunCount, out long totalZeroRunLength);
 
         ByteAnalysisHelper.ComputeStatsSummary(byteCounts, bytes.Length,
             out int uniqueBytes, out double mostCommonByteRatio, out double zeroByteRatio);
+
+        ByteAnalysisHelper.ComputeByteMoments(byteCounts, bytes.Length,
+            out double meanByteValue, out double byteValueVariance,
+            out double skewness, out double kurtosis);
 
         features.UniqueBytes = uniqueBytes;
         features.MostCommonByteRatio = mostCommonByteRatio;
@@ -454,6 +529,14 @@ public class FlashFeatureExtractor
         features.LetterRatio = (double)letterCount / bytes.Length;
         features.DigitRatio = (double)digitCount / bytes.Length;
         features.MaxZeroByteRun = maxZeroRun;
+        features.MeanByteValue = meanByteValue;
+        features.ByteValueVariance = byteValueVariance;
+        features.ByteDistributionSkewness = skewness;
+        features.ByteDistributionKurtosis = kurtosis;
+        features.MeanZeroRunLength = zeroRunCount > 0 ? (double)totalZeroRunLength / zeroRunCount : 0;
+        features.ZeroRunCount = zeroRunCount;
+        features.HeadBlockEntropy = ByteAnalysisHelper.ComputeRegionEntropy(bytes, 0, 512);
+        features.TailBlockEntropy = ByteAnalysisHelper.ComputeRegionEntropy(bytes, Math.Max(0, bytes.Length - 512), 512);
 
         return features;
     }
@@ -547,4 +630,128 @@ public class FileFeatures
 
         return features;
     }
+}
+
+public class ProFileFeatures
+{
+    public const int SectionCount = 3;
+
+    public int BytesPerSection { get; }
+    public int FeatureCount => SectionCount * BytesPerSection;
+    public float[] RawBytes { get; }
+
+    public ProFileFeatures(int bytesPerSection)
+    {
+        BytesPerSection = bytesPerSection;
+        RawBytes = new float[FeatureCount];
+    }
+
+    public float[] ToFloatArray()
+    {
+        var result = new float[FeatureCount];
+        Array.Copy(RawBytes, result, FeatureCount);
+        return result;
+    }
+}
+
+public class ProFeatureExtractor
+{
+    private const int PeCheckSize = 512;
+
+    public static ProFileFeatures ExtractFeatures(string filePath, int bytesPerSection)
+    {
+        var fileInfo = new FileInfo(filePath);
+        long fileSize = fileInfo.Length;
+
+        if (fileSize == 0)
+            throw new NotSupportedException("文件为空");
+
+        if (fileSize < 64)
+            throw new NotSupportedException("文件过小，无法进行PE格式验证");
+
+        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+
+        int checkSize = (int)Math.Min(PeCheckSize, fileSize);
+        byte[] checkBuf = new byte[checkSize];
+        int checkRead = 0;
+        while (checkRead < checkSize)
+        {
+            int n = fs.Read(checkBuf, checkRead, checkSize - checkRead);
+            if (n == 0) break;
+            checkRead += n;
+        }
+        if (!ByteAnalysisHelper.IsPeFile(checkBuf))
+            throw new NotSupportedException("不支持该文件类型");
+
+        var features = new ProFileFeatures(bytesPerSection);
+        int sectionSize = bytesPerSection;
+
+        ReadSection(fs, 0, (int)Math.Min(sectionSize, fileSize), features.RawBytes, 0);
+        long midStart = Math.Max(0, fileSize / 2 - sectionSize / 2);
+        int midLen = (int)(Math.Min(midStart + sectionSize, fileSize) - midStart);
+        ReadSection(fs, midStart, midLen, features.RawBytes, sectionSize);
+        long tailStart = Math.Max(0, fileSize - sectionSize);
+        int tailLen = (int)(fileSize - tailStart);
+        ReadSection(fs, tailStart, tailLen, features.RawBytes, sectionSize * 2);
+
+        return features;
+    }
+
+    private static void ReadSection(FileStream fs, long start, int length, float[] buffer, int bufferOffset)
+    {
+        if (length <= 0) return;
+        fs.Position = start;
+        byte[] temp = new byte[length];
+        int totalRead = 0;
+        while (totalRead < length)
+        {
+            int n = fs.Read(temp, totalRead, length - totalRead);
+            if (n == 0) break;
+            totalRead += n;
+        }
+        for (int i = 0; i < totalRead; i++)
+            buffer[bufferOffset + i] = temp[i];
+    }
+
+    public static ProFileFeatures ExtractFromBytes(byte[] bytes, int bytesPerSection)
+    {
+        if (bytes.Length == 0)
+            throw new NotSupportedException("文件为空");
+
+        if (bytes.Length < 64)
+            throw new NotSupportedException("文件过小，无法进行PE格式验证");
+
+        var features = new ProFileFeatures(bytesPerSection);
+
+        int sectionSize = bytesPerSection;
+        int totalFeatures = ProFileFeatures.SectionCount * sectionSize;
+
+        long fileSize = bytes.Length;
+
+        int headStart = 0;
+        int headEnd = Math.Min(sectionSize, (int)fileSize);
+
+        int midStart = Math.Max(0, (int)(fileSize / 2) - sectionSize / 2);
+        int midEnd = Math.Min(midStart + sectionSize, (int)fileSize);
+
+        int tailStart = Math.Max(0, (int)fileSize - sectionSize);
+        int tailEnd = (int)fileSize;
+
+        int offset = 0;
+
+        for (int i = headStart; i < headEnd && offset < totalFeatures; i++)
+            features.RawBytes[offset++] = bytes[i];
+        offset = sectionSize;
+
+        for (int i = midStart; i < midEnd && offset < sectionSize * 2; i++)
+            features.RawBytes[offset++] = bytes[i];
+        offset = sectionSize * 2;
+
+        for (int i = tailStart; i < tailEnd && offset < totalFeatures; i++)
+            features.RawBytes[offset++] = bytes[i];
+
+        return features;
+    }
+
+    public static bool IsPeFile(byte[] bytes) => ByteAnalysisHelper.IsPeFile(bytes);
 }

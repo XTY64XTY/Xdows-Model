@@ -34,6 +34,210 @@ public class ModelTrainer
         return TrainFlashModel(fileData, _config.FlashModelPath, _config.FlashOnnxPath);
     }
 
+    public (ITransformer model, int optimalBytesPerSection) TrainProModel(List<FileData> fileData, string modelPath, string? onnxPath = null)
+    {
+        return TrainProWithProgressiveExpansion(fileData, modelPath, onnxPath);
+    }
+
+    public (ITransformer model, int optimalBytesPerSection) TrainProModel(List<FileData> fileData)
+    {
+        return TrainProModel(fileData, _config.ProModelPath, _config.ProOnnxPath);
+    }
+
+    private (ITransformer model, int optimalBytesPerSection) TrainProWithProgressiveExpansion(List<FileData> fileData, string modelPath, string? onnxPath)
+    {
+        Console.WriteLine("\n开始训练 Pro 模型（渐进式扩展）...");
+
+        int currentBytesPerSection = _config.ProExpansionStartBytesPerSection;
+        int maxBytesPerSection = _config.ProExpansionMaxBytesPerSection;
+        double aucThreshold = _config.ProExpansionAucThreshold;
+        int patience = _config.ProExpansionPatience;
+
+        ITransformer bestModel = null!;
+        int bestBytesPerSection = currentBytesPerSection;
+        double bestAuc = 0;
+        int noImprovementCount = 0;
+        IDataView? bestDataView = null;
+
+        while (currentBytesPerSection <= maxBytesPerSection)
+        {
+            int featureCount = ProFileFeatures.SectionCount * currentBytesPerSection;
+            Console.WriteLine($"\n--- Pro 渐进式扩展：每段 {currentBytesPerSection} 字节，特征维度 {featureCount} ---");
+
+            var (model, auc, dataView) = TrainProStep(fileData, currentBytesPerSection);
+
+            if (auc > bestAuc + aucThreshold)
+            {
+                bestAuc = auc;
+                bestModel = model;
+                bestBytesPerSection = currentBytesPerSection;
+                bestDataView = dataView;
+                noImprovementCount = 0;
+                Console.WriteLine($"  AUC 提升：{auc:P4}（最佳）");
+            }
+            else
+            {
+                noImprovementCount++;
+                Console.WriteLine($"  AUC 未显著提升：{auc:P4}（连续 {noImprovementCount}/{patience} 步）");
+
+                if (noImprovementCount >= patience)
+                {
+                    Console.WriteLine($"  连续 {patience} 步无显著提升，停止扩展。");
+                    break;
+                }
+            }
+
+            currentBytesPerSection *= _config.ProExpansionFactor;
+        }
+
+        if (bestModel == null || bestDataView == null)
+        {
+            Console.WriteLine("警告：Pro 模型渐进式扩展未产生有效模型。");
+            return (null!, bestBytesPerSection);
+        }
+
+        Console.WriteLine($"\n正在保存最优 Pro 模型...");
+        _mlContext.Model.Save(bestModel, bestDataView.Schema, modelPath);
+        Console.WriteLine($"Pro ML.NET 模型已保存至: {modelPath}");
+
+        if (!string.IsNullOrEmpty(onnxPath))
+        {
+            try
+            {
+                ExportToOnnx(bestModel, bestDataView, onnxPath);
+                Console.WriteLine($"Pro ONNX 模型已保存至: {onnxPath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Pro ONNX 导出失败：{ex.Message}");
+            }
+        }
+
+        Console.WriteLine($"\n=== Pro 模型渐进式扩展完成 ===");
+        Console.WriteLine($"最优每段字节数：{bestBytesPerSection}");
+        Console.WriteLine($"最优特征维度：{ProFileFeatures.SectionCount * bestBytesPerSection}");
+        Console.WriteLine($"最优 AUC：{bestAuc:P4}");
+
+        return (bestModel, bestBytesPerSection);
+    }
+
+    private (ITransformer model, double auc, IDataView dataView) TrainProStep(List<FileData> fileData, int bytesPerSection)
+    {
+        int featureCount = ProFileFeatures.SectionCount * bytesPerSection;
+
+        var validData = new List<FileData>();
+        var validFeatures = new List<float[]>();
+        int emptyFeaturesCount = 0;
+
+        foreach (var fd in fileData)
+        {
+            try
+            {
+                var proFeatures = ProFeatureExtractor.ExtractFeatures(fd.FilePath, bytesPerSection);
+                var floatArray = proFeatures.ToFloatArray();
+                if (floatArray.Length != featureCount)
+                {
+                    emptyFeaturesCount++;
+                }
+                else
+                {
+                    validData.Add(fd);
+                    validFeatures.Add(floatArray);
+                }
+            }
+            catch
+            {
+                emptyFeaturesCount++;
+            }
+        }
+
+        if (emptyFeaturesCount > 0)
+        {
+            Console.WriteLine($"  警告：{emptyFeaturesCount} 个文件特征提取失败");
+            Console.WriteLine($"  提示：可使用选项7「清洗非PE文件（含Pro兼容性检查）」功能清理不兼容的文件");
+        }
+
+        if (validData.Count == 0)
+        {
+            Console.WriteLine("  错误：没有有效的训练数据！");
+            return (null!, 0, null!);
+        }
+
+        Console.WriteLine($"  有效训练数据：{validData.Count} 个");
+
+        var blackCount = validData.Count(d => d.Label);
+        var whiteCount = validData.Count(d => !d.Label);
+        Console.WriteLine($"  黑文件：{blackCount}，白文件：{whiteCount}");
+
+        if (blackCount == 0 || whiteCount == 0)
+        {
+            Console.WriteLine("  错误：有效数据中只有一类标签，无法训练！");
+            return (null!, 0, null!);
+        }
+
+        var trainingData = validData.Select((fd, idx) => new ProBinaryTrainingData(featureCount)
+        {
+            Features = validFeatures[idx],
+            Label = fd.Label
+        }).ToList();
+
+        var schemaDef = SchemaDefinition.Create(typeof(ProBinaryTrainingData));
+        schemaDef["Features"].ColumnType = new VectorDataViewType(NumberDataViewType.Single, featureCount);
+
+        var fullDataView = _mlContext.Data.LoadFromEnumerable(trainingData, schemaDef);
+        var trainTestSplit = _mlContext.Data.TrainTestSplit(fullDataView, testFraction: 0.2);
+
+        var pipeline = BuildProPipeline(featureCount);
+        var model = pipeline.Fit(trainTestSplit.TrainSet);
+
+        double auc;
+        try
+        {
+            var predictions = model.Transform(trainTestSplit.TestSet);
+            var metrics = _mlContext.BinaryClassification.Evaluate(predictions);
+            auc = metrics.AreaUnderRocCurve;
+            Console.WriteLine($"  准确率: {metrics.Accuracy:P4}，AUC: {auc:P4}，F1: {metrics.F1Score:P4}");
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            auc = 0;
+            Console.WriteLine("  警告：AUC 无法计算（测试集类别不平衡），使用 AUC=0");
+        }
+
+        return (model, auc, fullDataView);
+    }
+
+    private IEstimator<ITransformer> BuildProPipeline(int featureCount)
+    {
+        var options = new Microsoft.ML.Trainers.LightGbm.LightGbmBinaryTrainer.Options
+        {
+            LabelColumnName = "Label",
+            FeatureColumnName = "Features",
+            LearningRate = _config.LearningRate,
+            NumberOfLeaves = _config.NumberOfLeaves,
+            MinimumExampleCountPerLeaf = _config.MinimumExampleCountPerLeaf,
+            NumberOfIterations = _config.NumberOfIterations
+        };
+
+        return _mlContext.Transforms.Concatenate("Features", "Features")
+            .Append(_mlContext.BinaryClassification.Trainers.LightGbm(options));
+    }
+
+    public void PredictPro(ITransformer model, FileData fileData, int bytesPerSection)
+    {
+        int featureCount = ProFileFeatures.SectionCount * bytesPerSection;
+        var proFeatures = ProFeatureExtractor.ExtractFeatures(fileData.FilePath, bytesPerSection);
+        var schemaDef = SchemaDefinition.Create(typeof(ProBinaryTrainingData));
+        schemaDef["Features"].ColumnType = new VectorDataViewType(NumberDataViewType.Single, featureCount);
+        var predictionEngine = _mlContext.Model.CreatePredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>(model, inputSchemaDefinition: schemaDef);
+        var prediction = predictionEngine.Predict(new ProBinaryTrainingData(bytesPerSection)
+        {
+            Features = proFeatures.ToFloatArray(),
+            Label = fileData.Label
+        });
+        PrintPrediction(fileData, prediction);
+    }
+
     private ITransformer TrainCore(List<FileData> fileData, string modelPath, string? onnxPath, bool flash)
     {
         int expectedFeatureCount = flash ? FlashFileFeatures.FeatureCount : FileFeatures.FeatureCount;
@@ -221,6 +425,20 @@ public class FlashBinaryTrainingData
     public float[] Features { get; set; } = Array.Empty<float>();
 
     public bool Label { get; set; }
+}
+
+public class ProBinaryTrainingData
+{
+    public float[] Features { get; set; } = Array.Empty<float>();
+
+    public bool Label { get; set; }
+
+    public ProBinaryTrainingData(int featureCount)
+    {
+        Features = new float[featureCount];
+    }
+
+    public ProBinaryTrainingData() { }
 }
 
 public class BinaryModelPrediction

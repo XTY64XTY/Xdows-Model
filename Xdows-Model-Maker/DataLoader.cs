@@ -7,7 +7,9 @@ public enum DataLoadMode
 {
     Standard,
     FlashOnly,
-    Both
+    Both,
+    ProOnly,
+    All
 }
 
 public class DataLoader
@@ -95,8 +97,6 @@ public class DataLoader
     {
         try
         {
-            var bytes = await File.ReadAllBytesAsync(file);
-
             var fileData = new FileData
             {
                 FilePath = file,
@@ -105,16 +105,34 @@ public class DataLoader
 
             switch (_currentMode)
             {
+                case DataLoadMode.ProOnly:
+                    break;
                 case DataLoadMode.FlashOnly:
-                    fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                    {
+                        var bytes = await File.ReadAllBytesAsync(file);
+                        fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                    }
                     break;
                 case DataLoadMode.Standard:
-                    fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
+                    {
+                        var bytes = await File.ReadAllBytesAsync(file);
+                        fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
+                    }
                     break;
                 case DataLoadMode.Both:
                 default:
-                    fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
-                    fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                    {
+                        var bytes = await File.ReadAllBytesAsync(file);
+                        fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
+                        fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                    }
+                    break;
+                case DataLoadMode.All:
+                    {
+                        var bytes = await File.ReadAllBytesAsync(file);
+                        fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
+                        fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                    }
                     break;
             }
 
@@ -137,21 +155,22 @@ public class DataLoader
         }
     }
 
-    public static void CleanNonPEFiles(TrainingConfig config)
+    public static void CleanNonPEFiles(TrainingConfig config, bool proCheck = false)
     {
-        CleanNonPEFiles(config.BlackFolder, config.WhiteFolder);
+        int proBytesPerSection = proCheck ? config.ProExpansionStartBytesPerSection : 512;
+        CleanNonPEFiles(config.BlackFolder, config.WhiteFolder, proCheck, proBytesPerSection);
     }
 
-    public static void CleanNonPEFiles(string blackFolder, string whiteFolder)
+    public static void CleanNonPEFiles(string blackFolder, string whiteFolder, bool proCheck = false, int proBytesPerSection = 512)
     {
         int totalDeleted = 0;
 
-        Console.WriteLine("开始清洗非PE文件...\n");
+        Console.WriteLine(proCheck ? "开始清洗非PE文件（含Pro兼容性检查）...\n" : "开始清洗非PE文件...\n");
 
         if (Directory.Exists(blackFolder))
         {
             Console.WriteLine($"正在清洗黑文件目录: {blackFolder}");
-            int deleted = CleanDirectory(blackFolder, "黑文件");
+            int deleted = CleanDirectory(blackFolder, "黑文件", proCheck, proBytesPerSection);
             totalDeleted += deleted;
         }
         else
@@ -162,7 +181,7 @@ public class DataLoader
         if (Directory.Exists(whiteFolder))
         {
             Console.WriteLine($"\n正在清洗白文件目录: {whiteFolder}");
-            int deleted = CleanDirectory(whiteFolder, "白文件");
+            int deleted = CleanDirectory(whiteFolder, "白文件", proCheck, proBytesPerSection);
             totalDeleted += deleted;
         }
         else
@@ -171,11 +190,14 @@ public class DataLoader
         }
 
         Console.WriteLine($"\n=============================================");
-        Console.WriteLine($"  清洗完成！共删除 {totalDeleted} 个非PE文件");
+        if (proCheck)
+            Console.WriteLine($"  清洗完成！共删除 {totalDeleted} 个非PE或不兼容Pro的文件");
+        else
+            Console.WriteLine($"  清洗完成！共删除 {totalDeleted} 个非PE文件");
         Console.WriteLine("=============================================");
     }
 
-    private static int CleanDirectory(string folder, string folderName)
+    private static int CleanDirectory(string folder, string folderName, bool proCheck = false, int proBytesPerSection = 512)
     {
         var files = Directory.GetFiles(folder);
         int deletedCount = 0;
@@ -190,16 +212,26 @@ public class DataLoader
 
             try
             {
-                var bytes = File.ReadAllBytes(file);
-
-                if (bytes.Length == 64)
+                if (proCheck)
                 {
-                    Console.Write($"\r检查{folderName} ({i + 1}/{totalCount}) - {fileName} [跳过64字节文件]");
-                    continue;
+                    var fileInfo = new FileInfo(file);
+                    if (fileInfo.Length < 64)
+                        throw new Exception("文件过小，不兼容Pro模型");
+                    ProFeatureExtractor.ExtractFeatures(file, proBytesPerSection);
                 }
+                else
+                {
+                    var bytes = File.ReadAllBytes(file);
 
-                if (!FeatureExtractor.IsPeFile(bytes))
-                    throw new Exception("不是PE文件");
+                    if (bytes.Length == 64)
+                    {
+                        Console.Write($"\r检查{folderName} ({i + 1}/{totalCount}) - {fileName} [跳过64字节文件]");
+                        continue;
+                    }
+
+                    if (!FeatureExtractor.IsPeFile(bytes))
+                        throw new Exception("不是PE文件");
+                }
 
                 Console.Write($"\r检查{folderName} ({i + 1}/{totalCount}) - {fileName}");
             }
@@ -207,11 +239,13 @@ public class DataLoader
             {
                 File.Delete(file);
                 deletedCount++;
-                Console.Write($"\r已删除{folderName}非PE文件 ({deletedCount}/{totalCount}) - {fileName}");
+                string reason = proCheck ? "不兼容文件" : "非PE文件";
+                Console.Write($"\r已删除{folderName}{reason} ({deletedCount}/{totalCount}) - {fileName}");
             }
         }
 
-        Console.WriteLine($"\n{folderName}目录清洗完成，删除 {deletedCount} 个非PE文件");
+        string summaryLabel = proCheck ? "不兼容文件" : "非PE文件";
+        Console.WriteLine($"\n{folderName}目录清洗完成，删除 {deletedCount} 个{summaryLabel}");
         return deletedCount;
     }
 }

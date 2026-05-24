@@ -25,6 +25,10 @@
     <Content Include="Xdows-Model-Flash.onnx" Condition="Exists('Xdows-Model-Flash.onnx')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <EmbeddedResource Include="Xdows-Model-Pro.onnx" Condition="Exists('Xdows-Model-Pro.onnx')" />
+    <Content Include="Xdows-Model-Pro.onnx" Condition="Exists('Xdows-Model-Pro.onnx')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>
