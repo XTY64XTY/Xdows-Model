@@ -213,13 +213,13 @@ public class ModelTrainer
         {
             LabelColumnName = "Label",
             FeatureColumnName = "Features",
-            LearningRate = _config.LearningRate,
-            NumberOfLeaves = _config.NumberOfLeaves,
-            MinimumExampleCountPerLeaf = _config.MinimumExampleCountPerLeaf,
-            NumberOfIterations = _config.NumberOfIterations
+            LearningRate = _config.ProLearningRate,
+            NumberOfLeaves = _config.ProNumberOfLeaves,
+            MinimumExampleCountPerLeaf = _config.ProMinimumExampleCountPerLeaf,
+            NumberOfIterations = _config.ProNumberOfIterations
         };
 
-        return _mlContext.Transforms.Concatenate("Features", "Features")
+        return _mlContext.Transforms.NormalizeMinMax("Features", "Features")
             .Append(_mlContext.BinaryClassification.Trainers.LightGbm(options));
     }
 

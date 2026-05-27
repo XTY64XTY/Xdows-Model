@@ -14,19 +14,24 @@ public class TrainingConfig
     public int ProExpansionStartBytesPerSection { get; set; } = 512;
     public int ProExpansionFactor { get; set; } = 2;
     public int ProExpansionMaxBytesPerSection { get; set; } = 4096;
-    public double ProExpansionAucThreshold { get; set; } = 0.001;
-    public int ProExpansionPatience { get; set; } = 2;
+    public double ProExpansionAucThreshold { get; set; } = 0.0005;
+    public int ProExpansionPatience { get; set; } = 3;
 
-    public double LearningRate { get; set; } = 0.1;
-    public int NumberOfLeaves { get; set; } = 31;
-    public int MinimumExampleCountPerLeaf { get; set; } = 20;
-    public int NumberOfIterations { get; set; } = 400;
+    public double LearningRate { get; set; } = 0.06;
+    public int NumberOfLeaves { get; set; } = 63;
+    public int MinimumExampleCountPerLeaf { get; set; } = 12;
+    public int NumberOfIterations { get; set; } = 1000;
     public int? RandomSeed { get; set; } = 42;
 
-    public double FlashLearningRate { get; set; } = 0.05;
-    public int FlashNumberOfLeaves { get; set; } = 20;
-    public int FlashMinimumExampleCountPerLeaf { get; set; } = 10;
-    public int FlashNumberOfIterations { get; set; } = 500;
+    public double FlashLearningRate { get; set; } = 0.08;
+    public int FlashNumberOfLeaves { get; set; } = 31;
+    public int FlashMinimumExampleCountPerLeaf { get; set; } = 8;
+    public int FlashNumberOfIterations { get; set; } = 800;
+
+    public double ProLearningRate { get; set; } = 0.05;
+    public int ProNumberOfLeaves { get; set; } = 63;
+    public int ProMinimumExampleCountPerLeaf { get; set; } = 10;
+    public int ProNumberOfIterations { get; set; } = 1000;
 
     public void PrintConfig()
     {
@@ -54,6 +59,11 @@ public class TrainingConfig
         Console.WriteLine($"  Flash 叶子数: {FlashNumberOfLeaves}");
         Console.WriteLine($"  Flash 最小叶节点样本数: {FlashMinimumExampleCountPerLeaf}");
         Console.WriteLine($"  Flash 迭代次数: {FlashNumberOfIterations}");
+        Console.WriteLine($"\nPro 专用超参数:");
+        Console.WriteLine($"  Pro 学习率: {ProLearningRate}");
+        Console.WriteLine($"  Pro 叶子数: {ProNumberOfLeaves}");
+        Console.WriteLine($"  Pro 最小叶节点样本数: {ProMinimumExampleCountPerLeaf}");
+        Console.WriteLine($"  Pro 迭代次数: {ProNumberOfIterations}");
         Console.WriteLine("================\n");
     }
 }
