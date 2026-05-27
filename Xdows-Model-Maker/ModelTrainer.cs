@@ -311,7 +311,7 @@ public class ModelTrainer
         var trainData = trainTestSplit.TrainSet;
         var testData = trainTestSplit.TestSet;
 
-        var pipeline = BuildPipeline(labelColumnName);
+        var pipeline = flash ? BuildFlashPipeline(labelColumnName) : BuildPipeline(labelColumnName);
 
         Console.WriteLine($"正在训练{modeLabel}LightGBM 模型...");
         var model = pipeline.Fit(trainData);
@@ -357,6 +357,22 @@ public class ModelTrainer
             NumberOfLeaves = _config.NumberOfLeaves,
             MinimumExampleCountPerLeaf = _config.MinimumExampleCountPerLeaf,
             NumberOfIterations = _config.NumberOfIterations
+        };
+
+        return _mlContext.Transforms.Concatenate("Features", "Features")
+            .Append(_mlContext.BinaryClassification.Trainers.LightGbm(options));
+    }
+
+    private IEstimator<ITransformer> BuildFlashPipeline(string labelColumnName)
+    {
+        var options = new Microsoft.ML.Trainers.LightGbm.LightGbmBinaryTrainer.Options
+        {
+            LabelColumnName = labelColumnName,
+            FeatureColumnName = "Features",
+            LearningRate = _config.FlashLearningRate,
+            NumberOfLeaves = _config.FlashNumberOfLeaves,
+            MinimumExampleCountPerLeaf = _config.FlashMinimumExampleCountPerLeaf,
+            NumberOfIterations = _config.FlashNumberOfIterations
         };
 
         return _mlContext.Transforms.Concatenate("Features", "Features")

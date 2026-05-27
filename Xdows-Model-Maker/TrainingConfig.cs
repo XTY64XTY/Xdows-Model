@@ -23,6 +23,11 @@ public class TrainingConfig
     public int NumberOfIterations { get; set; } = 400;
     public int? RandomSeed { get; set; } = 42;
 
+    public double FlashLearningRate { get; set; } = 0.05;
+    public int FlashNumberOfLeaves { get; set; } = 20;
+    public int FlashMinimumExampleCountPerLeaf { get; set; } = 10;
+    public int FlashNumberOfIterations { get; set; } = 500;
+
     public void PrintConfig()
     {
         Console.WriteLine("\n=== 训练配置 ===");
@@ -39,11 +44,16 @@ public class TrainingConfig
         Console.WriteLine($"Pro 渐进式扩展最大字节/段: {ProExpansionMaxBytesPerSection}");
         Console.WriteLine($"Pro 渐进式扩展 AUC 阈值: {ProExpansionAucThreshold}");
         Console.WriteLine($"Pro 渐进式扩展耐心步数: {ProExpansionPatience}");
-        Console.WriteLine($"\n学习率 (Learning Rate): {LearningRate}");
+        Console.WriteLine($"学习率 (Learning Rate): {LearningRate}");
         Console.WriteLine($"叶子数 (Number of Leaves): {NumberOfLeaves}");
         Console.WriteLine($"最小叶节点样本数: {MinimumExampleCountPerLeaf}");
         Console.WriteLine($"迭代次数 (Iterations): {NumberOfIterations}");
         Console.WriteLine($"随机种子: {RandomSeed}");
+        Console.WriteLine($"\nFlash 专用超参数:");
+        Console.WriteLine($"  Flash 学习率: {FlashLearningRate}");
+        Console.WriteLine($"  Flash 叶子数: {FlashNumberOfLeaves}");
+        Console.WriteLine($"  Flash 最小叶节点样本数: {FlashMinimumExampleCountPerLeaf}");
+        Console.WriteLine($"  Flash 迭代次数: {FlashNumberOfIterations}");
         Console.WriteLine("================\n");
     }
 }

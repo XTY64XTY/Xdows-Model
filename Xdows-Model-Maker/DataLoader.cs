@@ -124,7 +124,8 @@ public class DataLoader
                     {
                         var bytes = await File.ReadAllBytesAsync(file);
                         fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
-                        fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                        try { fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes); }
+                        catch (NotSupportedException) { fileData.FlashFeatures = new FlashFileFeatures(); }
                     }
                     break;
             }
