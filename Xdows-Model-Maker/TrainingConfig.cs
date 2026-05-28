@@ -17,53 +17,67 @@ public class TrainingConfig
     public double ProExpansionAucThreshold { get; set; } = 0.0005;
     public int ProExpansionPatience { get; set; } = 3;
 
-    public double LearningRate { get; set; } = 0.06;
-    public int NumberOfLeaves { get; set; } = 63;
-    public int MinimumExampleCountPerLeaf { get; set; } = 12;
-    public int NumberOfIterations { get; set; } = 1000;
+    public double LearningRate { get; set; } = 0.1;
+    public int NumberOfLeaves { get; set; } = 31;
+    public int MinimumExampleCountPerLeaf { get; set; } = 20;
+    public int NumberOfIterations { get; set; } = 400;
+    public double StandardL1Regularization { get; set; } = 0;
+    public double StandardL2Regularization { get; set; } = 0;
     public int? RandomSeed { get; set; } = 42;
 
-    public double FlashLearningRate { get; set; } = 0.08;
-    public int FlashNumberOfLeaves { get; set; } = 31;
-    public int FlashMinimumExampleCountPerLeaf { get; set; } = 8;
-    public int FlashNumberOfIterations { get; set; } = 800;
+    public double FlashLearningRate { get; set; } = 0.05;
+    public int FlashNumberOfLeaves { get; set; } = 20;
+    public int FlashMinimumExampleCountPerLeaf { get; set; } = 10;
+    public int FlashNumberOfIterations { get; set; } = 500;
+    public double FlashL1Regularization { get; set; } = 0;
+    public double FlashL2Regularization { get; set; } = 0;
 
     public double ProLearningRate { get; set; } = 0.05;
     public int ProNumberOfLeaves { get; set; } = 63;
     public int ProMinimumExampleCountPerLeaf { get; set; } = 10;
     public int ProNumberOfIterations { get; set; } = 1000;
+    public double ProL1Regularization { get; set; } = 0.01;
+    public double ProL2Regularization { get; set; } = 0.1;
 
-    public void PrintConfig()
+    public void PrintStandardConfig()
     {
-        Console.WriteLine("\n=== 训练配置 ===");
-        Console.WriteLine($"黑文件目录: {BlackFolder}");
-        Console.WriteLine($"白文件目录: {WhiteFolder}");
-        Console.WriteLine($"ML.NET 模型路径: {ModelPath}");
-        Console.WriteLine($"ONNX 模型路径: {OnnxPath}");
-        Console.WriteLine($"Flash ML.NET 模型路径: {FlashModelPath}");
-        Console.WriteLine($"Flash ONNX 模型路径: {FlashOnnxPath}");
-        Console.WriteLine($"Pro ML.NET 模型路径: {ProModelPath}");
-        Console.WriteLine($"Pro ONNX 模型路径: {ProOnnxPath}");
-        Console.WriteLine($"\nPro 渐进式扩展起始字节/段: {ProExpansionStartBytesPerSection}");
-        Console.WriteLine($"Pro 渐进式扩展因子: {ProExpansionFactor}");
-        Console.WriteLine($"Pro 渐进式扩展最大字节/段: {ProExpansionMaxBytesPerSection}");
-        Console.WriteLine($"Pro 渐进式扩展 AUC 阈值: {ProExpansionAucThreshold}");
-        Console.WriteLine($"Pro 渐进式扩展耐心步数: {ProExpansionPatience}");
+        Console.WriteLine("\n=== Standard 模型配置 ===");
         Console.WriteLine($"学习率 (Learning Rate): {LearningRate}");
         Console.WriteLine($"叶子数 (Number of Leaves): {NumberOfLeaves}");
         Console.WriteLine($"最小叶节点样本数: {MinimumExampleCountPerLeaf}");
         Console.WriteLine($"迭代次数 (Iterations): {NumberOfIterations}");
+        Console.WriteLine($"L1 正则化: {StandardL1Regularization}");
+        Console.WriteLine($"L2 正则化: {StandardL2Regularization}");
         Console.WriteLine($"随机种子: {RandomSeed}");
-        Console.WriteLine($"\nFlash 专用超参数:");
-        Console.WriteLine($"  Flash 学习率: {FlashLearningRate}");
-        Console.WriteLine($"  Flash 叶子数: {FlashNumberOfLeaves}");
-        Console.WriteLine($"  Flash 最小叶节点样本数: {FlashMinimumExampleCountPerLeaf}");
-        Console.WriteLine($"  Flash 迭代次数: {FlashNumberOfIterations}");
-        Console.WriteLine($"\nPro 专用超参数:");
-        Console.WriteLine($"  Pro 学习率: {ProLearningRate}");
-        Console.WriteLine($"  Pro 叶子数: {ProNumberOfLeaves}");
-        Console.WriteLine($"  Pro 最小叶节点样本数: {ProMinimumExampleCountPerLeaf}");
-        Console.WriteLine($"  Pro 迭代次数: {ProNumberOfIterations}");
-        Console.WriteLine("================\n");
+        Console.WriteLine("========================\n");
+    }
+
+    public void PrintFlashConfig()
+    {
+        Console.WriteLine("\n=== Flash 模型配置 ===");
+        Console.WriteLine($"学习率 (Learning Rate): {FlashLearningRate}");
+        Console.WriteLine($"叶子数 (Number of Leaves): {FlashNumberOfLeaves}");
+        Console.WriteLine($"最小叶节点样本数: {FlashMinimumExampleCountPerLeaf}");
+        Console.WriteLine($"迭代次数 (Iterations): {FlashNumberOfIterations}");
+        Console.WriteLine($"L1 正则化: {FlashL1Regularization}");
+        Console.WriteLine($"L2 正则化: {FlashL2Regularization}");
+        Console.WriteLine("========================\n");
+    }
+
+    public void PrintProConfig()
+    {
+        Console.WriteLine("\n=== Pro 模型配置 ===");
+        Console.WriteLine($"Pro 渐进式扩展起始字节/段: {ProExpansionStartBytesPerSection}");
+        Console.WriteLine($"Pro 渐进式扩展因子: {ProExpansionFactor}");
+        Console.WriteLine($"Pro 渐进式扩展最大字节/段: {ProExpansionMaxBytesPerSection}");
+        Console.WriteLine($"Pro 渐进式扩展 AUC 阈值: {ProExpansionAucThreshold}");
+        Console.WriteLine($"Pro 渐进式扩展耐心步数: {ProExpansionPatience}");
+        Console.WriteLine($"学习率 (Learning Rate): {ProLearningRate}");
+        Console.WriteLine($"叶子数 (Number of Leaves): {ProNumberOfLeaves}");
+        Console.WriteLine($"最小叶节点样本数: {ProMinimumExampleCountPerLeaf}");
+        Console.WriteLine($"迭代次数 (Iterations): {ProNumberOfIterations}");
+        Console.WriteLine($"L1 正则化: {ProL1Regularization}");
+        Console.WriteLine($"L2 正则化: {ProL2Regularization}");
+        Console.WriteLine("========================\n");
     }
 }

@@ -7,11 +7,18 @@ public class ModelTrainer
 {
     private readonly MLContext _mlContext;
     private readonly TrainingConfig _config;
+    private volatile bool _proTrainingCancelled;
 
     public ModelTrainer(TrainingConfig config)
     {
         _config = config;
         _mlContext = new MLContext(seed: config.RandomSeed);
+        _proTrainingCancelled = false;
+    }
+
+    public void CancelProTraining()
+    {
+        _proTrainingCancelled = true;
     }
 
     public ITransformer TrainModel(List<FileData> fileData, string modelPath, string? onnxPath = null)
@@ -47,6 +54,7 @@ public class ModelTrainer
     private (ITransformer model, int optimalBytesPerSection) TrainProWithProgressiveExpansion(List<FileData> fileData, string modelPath, string? onnxPath)
     {
         Console.WriteLine("\n开始训练 Pro 模型（渐进式扩展）...");
+        Console.WriteLine("提示：训练过程中按 'S' 键可随时停止并保存当前最优模型。\n");
 
         int currentBytesPerSection = _config.ProExpansionStartBytesPerSection;
         int maxBytesPerSection = _config.ProExpansionMaxBytesPerSection;
@@ -61,10 +69,29 @@ public class ModelTrainer
 
         while (currentBytesPerSection <= maxBytesPerSection)
         {
+            if (_proTrainingCancelled)
+            {
+                Console.WriteLine("\n检测到停止信号，正在保存当前最优模型...");
+                break;
+            }
+
             int featureCount = ProFileFeatures.SectionCount * currentBytesPerSection;
             Console.WriteLine($"\n--- Pro 渐进式扩展：每段 {currentBytesPerSection} 字节，特征维度 {featureCount} ---");
 
             var (model, auc, dataView) = TrainProStep(fileData, currentBytesPerSection);
+
+            if (_proTrainingCancelled)
+            {
+                Console.WriteLine("\n检测到停止信号，正在保存当前最优模型...");
+                if (model != null && dataView != null && auc > bestAuc)
+                {
+                    bestAuc = auc;
+                    bestModel = model;
+                    bestBytesPerSection = currentBytesPerSection;
+                    bestDataView = dataView;
+                }
+                break;
+            }
 
             if (auc > bestAuc + aucThreshold)
             {
