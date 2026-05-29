@@ -1,6 +1,3 @@
-using System;
-using System.Threading;
-
 namespace Xdows_Model_Maker;
 
 internal class Program
@@ -27,9 +24,9 @@ internal class Program
     {
         Console.WriteLine("================================================================");
         Console.WriteLine(@" __  __   _                      __  __           _      _ ");
-        Console.WriteLine(@" \/ /__| | _____      _____   |  \/  | ___   __| | ___| |");
-        Console.WriteLine(@"  \ // _` |/ _ \ \ /\ / / __|  | |\/| |/ _ \ / _` |/ _ \ |");
-        Console.WriteLine(@"  / \ (_| | (_) \ V  V /\__ \  | |  | | (_) | (_| |  __/ |");
+        Console.WriteLine(@" \ \/ /__| | _____      _____   |  \/  | ___   __| | ___| |");
+        Console.WriteLine(@"  \  // _` |/ _ \ \ /\ / / __|  | |\/| |/ _ \ / _` |/ _ \ |");
+        Console.WriteLine(@"  /  \ (_| | (_) \ V  V /\__ \  | |  | | (_) | (_| |  __/ |");
         Console.WriteLine(@" /_/\_\__,_|\___/ \_/\_/ |___/  |_|  |_|\___/ \__,_|\___|_|");
         Console.WriteLine("\n                                                  —— By Shiyi");
         Console.WriteLine("================================================================");
@@ -111,7 +108,7 @@ internal class Program
     {
         // 清除整个屏幕缓冲区，包括滚动区域
         Console.Clear();
-        
+
         // 尝试清除滚动缓冲区（Windows 特定）
         try
         {
@@ -132,13 +129,13 @@ internal class Program
     {
         // 清除整个屏幕缓冲区（包括滚动区域）
         ClearConsole();
-        
+
         // 重新绘制标题
         Console.WriteLine("================================================================");
         Console.WriteLine(@" __  __   _                      __  __           _      _ ");
-        Console.WriteLine(@" \/ /__| | _____      _____   |  \/  | ___   __| | ___| |");
-        Console.WriteLine(@"  \ // _` |/ _ \ \ /\ / / __|  | |\/| |/ _ \ / _` |/ _ \ |");
-        Console.WriteLine(@"  / \ (_| | (_) \ V  V /\__ \  | |  | | (_) | (_| |  __/ |");
+        Console.WriteLine(@" \ \/ /__| | _____      _____   |  \/  | ___   __| | ___| |");
+        Console.WriteLine(@"  \  // _` |/ _ \ \ /\ / / __|  | |\/| |/ _ \ / _` |/ _ \ |");
+        Console.WriteLine(@"  /  \ (_| | (_) \ V  V /\__ \  | |  | | (_) | (_| |  __/ |");
         Console.WriteLine(@" /_/\_\__,_|\___/ \_/\_/ |___/  |_|  |_|\___/ \__,_|\___|_|");
         Console.WriteLine("\n                                                  —— By Shiyi");
         Console.WriteLine("================================================================");

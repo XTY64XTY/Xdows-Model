@@ -17,25 +17,25 @@ public class TrainingConfig
     public double ProExpansionAucThreshold { get; set; } = 0.0005;
     public int ProExpansionPatience { get; set; } = 3;
 
-    public double LearningRate { get; set; } = 0.1;
+    public double LearningRate { get; set; } = 0.05;
     public int NumberOfLeaves { get; set; } = 31;
-    public int MinimumExampleCountPerLeaf { get; set; } = 20;
-    public int NumberOfIterations { get; set; } = 400;
+    public int MinimumExampleCountPerLeaf { get; set; } = 31;
+    public int NumberOfIterations { get; set; } = 800;
     public double StandardL1Regularization { get; set; } = 0;
     public double StandardL2Regularization { get; set; } = 0;
     public int? RandomSeed { get; set; } = 42;
 
-    public double FlashLearningRate { get; set; } = 0.05;
-    public int FlashNumberOfLeaves { get; set; } = 20;
-    public int FlashMinimumExampleCountPerLeaf { get; set; } = 10;
-    public int FlashNumberOfIterations { get; set; } = 500;
+    public double FlashLearningRate { get; set; } = 0.1;
+    public int FlashNumberOfLeaves { get; set; } = 31;
+    public int FlashMinimumExampleCountPerLeaf { get; set; } = 8;
+    public int FlashNumberOfIterations { get; set; } = 800;
     public double FlashL1Regularization { get; set; } = 0;
     public double FlashL2Regularization { get; set; } = 0;
 
-    public double ProLearningRate { get; set; } = 0.05;
+    public double ProLearningRate { get; set; } = 0.01;
     public int ProNumberOfLeaves { get; set; } = 63;
     public int ProMinimumExampleCountPerLeaf { get; set; } = 10;
-    public int ProNumberOfIterations { get; set; } = 1000;
+    public int ProNumberOfIterations { get; set; } = 1200;
     public double ProL1Regularization { get; set; } = 0.01;
     public double ProL2Regularization { get; set; } = 0.1;
 
