@@ -363,7 +363,8 @@ public class FeatureExtractor
         ByteAnalysisHelper.ComputeCommonStatsSpan(bytes, byteCounts,
             out int printableCount, out int controlCount, out int whitespaceCount,
             out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount,
-            out _, out _);
+            out int zeroRunCount, out long totalZeroRunLength,
+            out int maxNonZeroRun, out long totalNonZeroRunLength, out int nonZeroRunCount);
 
         int uniqueBytes = 0;
         long maxCount = 0, minCount = long.MaxValue;
@@ -396,6 +397,36 @@ public class FeatureExtractor
         features.LetterRatio = (double)letterCount / bytes.Length;
         features.DigitRatio = (double)digitCount / bytes.Length;
         features.MaxZeroByteRun = maxZeroRun;
+
+        ByteAnalysisHelper.ComputeByteMoments(byteCounts, bytes.Length,
+            out double meanByteValue, out double byteValueVariance,
+            out double skewness, out double kurtosis);
+
+        ByteAnalysisHelper.ComputeByteRangeRatios(byteCounts, bytes.Length,
+            out double lowByteRatio, out double printableAsciiRatio, out double extendedAsciiRatio);
+
+        ByteAnalysisHelper.ComputeBlockEntropyStats(bytes, 4096, 128 * 1024,
+            out double headBlockEntropyMin, out double headBlockEntropyMax,
+            out double headBlockEntropyMean, out double headBlockEntropyVar);
+
+        features.MeanByteValue = meanByteValue;
+        features.ByteValueVariance = byteValueVariance;
+        features.ByteDistributionSkewness = skewness;
+        features.ByteDistributionKurtosis = kurtosis;
+        features.MeanZeroRunLength = zeroRunCount > 0 ? (double)totalZeroRunLength / zeroRunCount : 0;
+        features.ZeroRunCount = zeroRunCount;
+        features.LowByteRatio = lowByteRatio;
+        features.PrintableAsciiRatio = printableAsciiRatio;
+        features.ExtendedAsciiRatio = extendedAsciiRatio;
+        features.MaxNonZeroByteRun = maxNonZeroRun;
+        features.MeanNonZeroRunLength = nonZeroRunCount > 0 ? (double)totalNonZeroRunLength / nonZeroRunCount : 0;
+
+        ParsePeHeader(bytes, features);
+
+        features.HeadBlockEntropyMin = headBlockEntropyMin;
+        features.HeadBlockEntropyMax = headBlockEntropyMax;
+        features.HeadBlockEntropyMean = headBlockEntropyMean;
+        features.HeadBlockEntropyVar = headBlockEntropyVar;
 
         return features;
     }
@@ -473,6 +504,36 @@ public class FeatureExtractor
         features.LastBlockEntropy = lastBlockEntropy;
     }
 
+    private static void ParsePeHeader(byte[] headerBytes, FileFeatures features)
+    {
+        features.PeNumberOfSections = 0;
+        features.PeTimeDateStamp = 0;
+        features.PeCharacteristics = 0;
+        features.PeSizeOfHeaders = 0;
+        features.PeOptionalMagic = 0;
+
+        if (headerBytes.Length < 64) return;
+
+        int peOffset = BitConverter.ToInt32(headerBytes, 60);
+        if (peOffset < 0 || peOffset + 24 > headerBytes.Length || headerBytes[peOffset] != 'P' || headerBytes[peOffset + 1] != 'E')
+            return;
+
+        features.PeNumberOfSections = BitConverter.ToInt16(headerBytes, peOffset + 6);
+        features.PeTimeDateStamp = BitConverter.ToUInt32(headerBytes, peOffset + 8);
+        features.PeCharacteristics = BitConverter.ToUInt16(headerBytes, peOffset + 22);
+
+        int optHeaderOffset = peOffset + 24;
+        if (optHeaderOffset + 2 > headerBytes.Length) return;
+
+        features.PeOptionalMagic = BitConverter.ToUInt16(headerBytes, optHeaderOffset);
+
+        bool isPe32 = features.PeOptionalMagic == 0x10b;
+        int sizeOfHeadersFieldOffset = isPe32 ? optHeaderOffset + 60 : optHeaderOffset + 84;
+
+        if (sizeOfHeadersFieldOffset + 4 <= headerBytes.Length)
+            features.PeSizeOfHeaders = BitConverter.ToUInt32(headerBytes, sizeOfHeadersFieldOffset);
+    }
+
     public static bool IsPeFile(byte[] bytes) => ByteAnalysisHelper.IsPeFile(bytes);
 
     public static bool IsPeFileFromPath(string filePath)
@@ -500,7 +561,7 @@ public class FeatureExtractor
 
 public class FileFeatures
 {
-    public const int FeatureCount = 279;
+    public const int FeatureCount = 299;
 
     public double[] ByteFrequency { get; set; } = new double[256];
     public long FileSize { get; set; }
@@ -527,6 +588,27 @@ public class FileFeatures
 
     public double ZeroByteRatio { get; set; }
     public double HighEntropyRatio { get; set; }
+
+    public double MeanByteValue { get; set; }
+    public double ByteValueVariance { get; set; }
+    public double ByteDistributionSkewness { get; set; }
+    public double ByteDistributionKurtosis { get; set; }
+    public double MeanZeroRunLength { get; set; }
+    public int ZeroRunCount { get; set; }
+    public double LowByteRatio { get; set; }
+    public double PrintableAsciiRatio { get; set; }
+    public double ExtendedAsciiRatio { get; set; }
+    public int MaxNonZeroByteRun { get; set; }
+    public double MeanNonZeroRunLength { get; set; }
+    public short PeNumberOfSections { get; set; }
+    public uint PeTimeDateStamp { get; set; }
+    public ushort PeCharacteristics { get; set; }
+    public uint PeSizeOfHeaders { get; set; }
+    public ushort PeOptionalMagic { get; set; }
+    public double HeadBlockEntropyMin { get; set; }
+    public double HeadBlockEntropyMax { get; set; }
+    public double HeadBlockEntropyMean { get; set; }
+    public double HeadBlockEntropyVar { get; set; }
 
     public float[] ToFloatArray()
     {
@@ -559,6 +641,26 @@ public class FileFeatures
         features[idx++] = MaxZeroByteRun;
         features[idx++] = (float)ZeroByteRatio;
         features[idx++] = (float)HighEntropyRatio;
+        features[idx++] = (float)MeanByteValue;
+        features[idx++] = (float)ByteValueVariance;
+        features[idx++] = (float)ByteDistributionSkewness;
+        features[idx++] = (float)ByteDistributionKurtosis;
+        features[idx++] = (float)MeanZeroRunLength;
+        features[idx++] = ZeroRunCount;
+        features[idx++] = (float)LowByteRatio;
+        features[idx++] = (float)PrintableAsciiRatio;
+        features[idx++] = (float)ExtendedAsciiRatio;
+        features[idx++] = MaxNonZeroByteRun;
+        features[idx++] = (float)MeanNonZeroRunLength;
+        features[idx++] = PeNumberOfSections;
+        features[idx++] = (float)PeTimeDateStamp;
+        features[idx++] = PeCharacteristics;
+        features[idx++] = (float)PeSizeOfHeaders;
+        features[idx++] = PeOptionalMagic;
+        features[idx++] = (float)HeadBlockEntropyMin;
+        features[idx++] = (float)HeadBlockEntropyMax;
+        features[idx++] = (float)HeadBlockEntropyMean;
+        features[idx++] = (float)HeadBlockEntropyVar;
 
         return features;
     }
