@@ -17,6 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Xdows-Model-Config\Xdows-Model-Config.csproj" />
     <ProjectReference Include="..\Xdows-Model-Invoker\Xdows-Model-Invoker.csproj" />
   </ItemGroup>
 

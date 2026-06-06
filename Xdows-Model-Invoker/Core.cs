@@ -1,6 +1,7 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using System.Reflection;
+using Xdows_Model_Config;
 
 namespace Xdows_Model_Invoker
 {
@@ -16,11 +17,15 @@ namespace Xdows_Model_Invoker
         private const string DefaultModelFileName = "Xdows-Model.onnx";
         private const string DefaultFlashModelFileName = "Xdows-Model-Flash.onnx";
         private const string DefaultProModelFileName = "Xdows-Model-Pro.onnx";
+        private static readonly TrainingConfig _defaultConfig = new();
         private static readonly object _initLock = new();
         private static InferenceSession? _session;
         private static string? _loadedModelPath;
         private static ModelMode _mode = ModelMode.Standard;
         private static int? _proFeatureDimension;
+        private static float _standardThreshold = NormalizeThreshold((float)_defaultConfig.StandardThreshold);
+        private static float _flashThreshold = NormalizeThreshold((float)_defaultConfig.FlashThreshold);
+        private static float _proThreshold = NormalizeThreshold((float)_defaultConfig.ProThreshold);
 
         private static string EnsureModelAvailable(string fileName)
         {
@@ -57,7 +62,7 @@ namespace Xdows_Model_Invoker
         public static (bool isVirus, float probability) PredictWithMlNet(string modelPath, float[] features)
         {
             using var session = new InferenceSession(modelPath);
-            return RunInference(session, features, FileFeatures.FeatureCount);
+            return RunInference(session, features, FileFeatures.FeatureCount, _standardThreshold);
         }
 
         public static (bool isVirus, float probability) ScanFile(string filePath, string modelPath)
@@ -131,6 +136,25 @@ namespace Xdows_Model_Invoker
         public static bool IsProMode => _mode == ModelMode.Pro;
         public static ModelMode CurrentMode => _mode;
 
+        public static void ConfigureThresholds(TrainingConfig config)
+        {
+            ArgumentNullException.ThrowIfNull(config);
+
+            _standardThreshold = NormalizeThreshold((float)config.StandardThreshold);
+            _flashThreshold = NormalizeThreshold((float)config.FlashThreshold);
+            _proThreshold = NormalizeThreshold((float)config.ProThreshold);
+        }
+
+        public static float GetThreshold(ModelMode mode)
+        {
+            return mode switch
+            {
+                ModelMode.Flash => _flashThreshold,
+                ModelMode.Pro => _proThreshold,
+                _ => _standardThreshold
+            };
+        }
+
         public static void UnloadModel()
         {
             lock (_initLock)
@@ -182,7 +206,7 @@ namespace Xdows_Model_Invoker
                 _ => FileFeatures.FeatureCount
             };
 
-            return RunInference(_session, features, featureCount);
+            return RunInference(_session, features, featureCount, GetThreshold(_mode));
         }
 
         public static (bool isVirus, float probability) ScanFile(string filePath)
@@ -219,7 +243,7 @@ namespace Xdows_Model_Invoker
             return PredictWithInitializedModel(floatFeatures);
         }
 
-        private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features, int featureCount)
+        private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features, int featureCount, float threshold)
         {
             var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, featureCount });
             var labelTensor = new DenseTensor<bool>(new Memory<bool>(new bool[] { false }), new[] { 1, 1 });
@@ -243,9 +267,20 @@ namespace Xdows_Model_Invoker
                 if (probResult.Length > 0) probability = probResult[0] * 100;
             }
 
-            isVirus = probability >= 90.0f;
+            isVirus = probability >= threshold;
 
             return (isVirus, probability);
+        }
+
+        private static float NormalizeThreshold(float threshold)
+        {
+            if (float.IsNaN(threshold) || float.IsInfinity(threshold))
+                throw new ArgumentOutOfRangeException(nameof(threshold), "Threshold must be a finite percentage.");
+
+            if (threshold < 0 || threshold > 100)
+                throw new ArgumentOutOfRangeException(nameof(threshold), "Threshold must be between 0 and 100.");
+
+            return threshold;
         }
     }
 }

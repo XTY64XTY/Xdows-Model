@@ -1,3 +1,5 @@
+using Xdows_Model_Config;
+
 namespace Xdows_Model_Caller;
 
 internal class Program
@@ -72,6 +74,10 @@ internal class Program
             {
                 Xdows_Model_Invoker.ModelInvoker.Initialize();
             }
+
+            var currentMode = Xdows_Model_Invoker.ModelInvoker.CurrentMode;
+            Xdows_Model_Invoker.ModelInvoker.ConfigureThresholds(new TrainingConfig());
+            Console.WriteLine($"判毒阈值：{Xdows_Model_Invoker.ModelInvoker.GetThreshold(currentMode):F2}%");
 
             var (isVirus, probability) = Xdows_Model_Invoker.ModelInvoker.ScanFile(filePath);
 

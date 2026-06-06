@@ -17,6 +17,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Xdows-Model-Config\Xdows-Model-Config.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="Xdows-Model.onnx" Condition="Exists('Xdows-Model.onnx')" />
     <Content Include="Xdows-Model.onnx" Condition="Exists('Xdows-Model.onnx')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

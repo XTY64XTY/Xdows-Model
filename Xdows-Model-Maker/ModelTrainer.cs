@@ -1,5 +1,6 @@
 using Microsoft.ML;
 using Microsoft.ML.Data;
+using Xdows_Model_Config;
 
 namespace Xdows_Model_Maker;
 
@@ -223,7 +224,11 @@ public class ModelTrainer
             var predictions = model.Transform(trainTestSplit.TestSet);
             var metrics = _mlContext.BinaryClassification.Evaluate(predictions);
             auc = metrics.AreaUnderRocCurve;
-            Console.WriteLine($"  准确率: {metrics.Accuracy:P4}，AUC: {auc:P4}，F1: {metrics.F1Score:P4}");
+            var rows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(predictions, reuseRowObject: false).ToList();
+            var thresholdMetrics = ComputeThresholdMetrics(rows, _config.ProThreshold);
+            Console.WriteLine($"  阈值: {_config.ProThreshold:F2}%");
+            Console.WriteLine($"  准确率: {thresholdMetrics.Accuracy:P4}，AUC: {auc:P4}，F1: {thresholdMetrics.F1Score:P4}");
+            Console.WriteLine($"  检出率: {thresholdMetrics.TruePositiveRate:P4}，误报率: {thresholdMetrics.FalsePositiveRate:P4}，BrewTotal 代理分数: {thresholdMetrics.BrewTotalProxyScore:F2}");
         }
         catch (ArgumentOutOfRangeException)
         {
@@ -243,7 +248,12 @@ public class ModelTrainer
             LearningRate = _config.ProLearningRate,
             NumberOfLeaves = _config.ProNumberOfLeaves,
             MinimumExampleCountPerLeaf = _config.ProMinimumExampleCountPerLeaf,
-            NumberOfIterations = _config.ProNumberOfIterations
+            NumberOfIterations = _config.ProNumberOfIterations,
+            Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
+            {
+                L1Regularization = _config.ProL1Regularization,
+                L2Regularization = _config.ProL2Regularization
+            }
         };
 
         return _mlContext.Transforms.NormalizeMinMax("Features", "Features")
@@ -262,7 +272,7 @@ public class ModelTrainer
             Features = proFeatures.ToFloatArray(),
             Label = fileData.Label
         });
-        PrintPrediction(fileData, prediction);
+        PrintPrediction(fileData, prediction, _config.ProThreshold);
     }
 
     private ITransformer TrainCore(List<FileData> fileData, string modelPath, string? onnxPath, bool flash)
@@ -344,7 +354,8 @@ public class ModelTrainer
         var model = pipeline.Fit(trainData);
 
         Console.WriteLine($"正在评估{modeLabel}模型...");
-        EvaluateModel(model, testData, labelColumnName);
+        double threshold = flash ? _config.FlashThreshold : _config.StandardThreshold;
+        EvaluateModel(model, testData, labelColumnName, threshold);
 
         Console.WriteLine($"正在保存{modeLabel}ML.NET 模型到：{modelPath}");
         _mlContext.Model.Save(model, trainData.Schema, modelPath);
@@ -383,7 +394,12 @@ public class ModelTrainer
             LearningRate = _config.LearningRate,
             NumberOfLeaves = _config.NumberOfLeaves,
             MinimumExampleCountPerLeaf = _config.MinimumExampleCountPerLeaf,
-            NumberOfIterations = _config.NumberOfIterations
+            NumberOfIterations = _config.NumberOfIterations,
+            Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
+            {
+                L1Regularization = _config.StandardL1Regularization,
+                L2Regularization = _config.StandardL2Regularization
+            }
         };
 
         return _mlContext.Transforms.Concatenate("Features", "Features")
@@ -399,27 +415,81 @@ public class ModelTrainer
             LearningRate = _config.FlashLearningRate,
             NumberOfLeaves = _config.FlashNumberOfLeaves,
             MinimumExampleCountPerLeaf = _config.FlashMinimumExampleCountPerLeaf,
-            NumberOfIterations = _config.FlashNumberOfIterations
+            NumberOfIterations = _config.FlashNumberOfIterations,
+            Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
+            {
+                L1Regularization = _config.FlashL1Regularization,
+                L2Regularization = _config.FlashL2Regularization
+            }
         };
 
         return _mlContext.Transforms.Concatenate("Features", "Features")
             .Append(_mlContext.BinaryClassification.Trainers.LightGbm(options));
     }
 
-    private void EvaluateModel(ITransformer model, IDataView testData, string labelColumnName)
+    private void EvaluateModel(ITransformer model, IDataView testData, string labelColumnName, double threshold)
     {
         var predictions = model.Transform(testData);
 
         var metrics = _mlContext.BinaryClassification.Evaluate(predictions, labelColumnName: labelColumnName);
+        var rows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(predictions, reuseRowObject: false).ToList();
+        var thresholdMetrics = ComputeThresholdMetrics(rows, threshold);
 
         Console.WriteLine("\n=== 模型评估结果 ===");
-        Console.WriteLine($"准确率 (Accuracy): {metrics.Accuracy:P4}");
         Console.WriteLine($"AUC: {metrics.AreaUnderRocCurve:P4}");
         Console.WriteLine($"AUPRC: {metrics.AreaUnderPrecisionRecallCurve:P4}");
-        Console.WriteLine($"F1 分数：{metrics.F1Score:P4}");
+        Console.WriteLine($"判毒阈值: {threshold:F2}%");
+        Console.WriteLine($"准确率 (Accuracy): {thresholdMetrics.Accuracy:P4}");
+        Console.WriteLine($"检出率 (TPR): {thresholdMetrics.TruePositiveRate:P4}");
+        Console.WriteLine($"误报率 (FPR): {thresholdMetrics.FalsePositiveRate:P4}");
+        Console.WriteLine($"F1 分数: {thresholdMetrics.F1Score:P4}");
+        Console.WriteLine($"BrewTotal 代理分数: {thresholdMetrics.BrewTotalProxyScore:F2}");
 
         Console.WriteLine("\n混淆矩阵:");
-        Console.WriteLine(metrics.ConfusionMatrix.GetFormattedConfusionTable());
+        Console.WriteLine($"TP: {thresholdMetrics.TruePositive}, FN: {thresholdMetrics.FalseNegative}");
+        Console.WriteLine($"FP: {thresholdMetrics.FalsePositive}, TN: {thresholdMetrics.TrueNegative}");
+    }
+
+    private static ThresholdMetrics ComputeThresholdMetrics(List<ThresholdEvaluationRow> rows, double threshold)
+    {
+        long truePositive = 0;
+        long falseNegative = 0;
+        long falsePositive = 0;
+        long trueNegative = 0;
+
+        foreach (var row in rows)
+        {
+            bool predictedPositive = row.Probability * 100 >= threshold;
+            if (row.Label && predictedPositive)
+                truePositive++;
+            else if (row.Label)
+                falseNegative++;
+            else if (predictedPositive)
+                falsePositive++;
+            else
+                trueNegative++;
+        }
+
+        long total = truePositive + falseNegative + falsePositive + trueNegative;
+        double accuracy = total > 0 ? (double)(truePositive + trueNegative) / total : 0;
+        double precision = truePositive + falsePositive > 0 ? (double)truePositive / (truePositive + falsePositive) : 0;
+        double truePositiveRate = truePositive + falseNegative > 0 ? (double)truePositive / (truePositive + falseNegative) : 0;
+        double falsePositiveRate = falsePositive + trueNegative > 0 ? (double)falsePositive / (falsePositive + trueNegative) : 0;
+        double f1Score = precision + truePositiveRate > 0 ? 2 * precision * truePositiveRate / (precision + truePositiveRate) : 0;
+
+        double rawScore = truePositive * 10 - falseNegative * 7 - falsePositive * 10;
+        double brewTotalProxyScore = rawScore * truePositiveRate - Math.Abs(rawScore) * falsePositiveRate * 1.27;
+
+        return new ThresholdMetrics(
+            truePositive,
+            falseNegative,
+            falsePositive,
+            trueNegative,
+            accuracy,
+            truePositiveRate,
+            falsePositiveRate,
+            f1Score,
+            brewTotalProxyScore);
     }
 
     public void Predict(ITransformer model, FileData fileData)
@@ -430,7 +500,7 @@ public class ModelTrainer
             Features = fileData.Features.ToFloatArray(),
             Label = fileData.Label
         });
-        PrintPrediction(fileData, prediction);
+        PrintPrediction(fileData, prediction, _config.StandardThreshold);
     }
 
     public void PredictFlash(ITransformer model, FileData fileData)
@@ -441,16 +511,19 @@ public class ModelTrainer
             Features = fileData.FlashFeatures.ToFloatArray(),
             Label = fileData.Label
         });
-        PrintPrediction(fileData, prediction);
+        PrintPrediction(fileData, prediction, _config.FlashThreshold);
     }
 
-    private static void PrintPrediction(FileData fileData, BinaryModelPrediction prediction)
+    private static void PrintPrediction(FileData fileData, BinaryModelPrediction prediction, double threshold)
     {
+        bool thresholdedLabel = prediction.Probability * 100 >= threshold;
+
         Console.WriteLine($"\n文件：{Path.GetFileName(fileData.FilePath)}");
         Console.WriteLine($"实际标签：{(fileData.Label ? "黑文件" : "白文件")}");
-        Console.WriteLine($"预测标签：{(prediction.PredictedLabel ? "黑文件" : "白文件")}");
+        Console.WriteLine($"预测标签：{(thresholdedLabel ? "黑文件" : "白文件")}");
         Console.WriteLine($"预测概率：{prediction.Probability:P4}");
         Console.WriteLine($"预测分数：{prediction.Score:F4}");
+        Console.WriteLine($"判毒阈值：{threshold:F2}%");
     }
 }
 
@@ -461,6 +534,23 @@ public class BinaryTrainingData
 
     public bool Label { get; set; }
 }
+
+public class ThresholdEvaluationRow
+{
+    public bool Label { get; set; }
+    public float Probability { get; set; }
+}
+
+public record ThresholdMetrics(
+    long TruePositive,
+    long FalseNegative,
+    long FalsePositive,
+    long TrueNegative,
+    double Accuracy,
+    double TruePositiveRate,
+    double FalsePositiveRate,
+    double F1Score,
+    double BrewTotalProxyScore);
 
 public class FlashBinaryTrainingData
 {

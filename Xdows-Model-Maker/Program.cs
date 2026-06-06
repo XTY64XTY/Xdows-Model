@@ -1,3 +1,5 @@
+using Xdows_Model_Config;
+
 namespace Xdows_Model_Maker;
 
 internal class Program

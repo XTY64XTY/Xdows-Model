@@ -1,4 +1,4 @@
-namespace Xdows_Model_Maker;
+namespace Xdows_Model_Config;
 
 public class TrainingConfig
 {
@@ -11,6 +11,10 @@ public class TrainingConfig
     public string ProModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Pro.zip");
     public string ProOnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Pro.onnx");
 
+    public double StandardThreshold { get; set; } = 92.0;
+    public double FlashThreshold { get; set; } = 96.0;
+    public double ProThreshold { get; set; } = 94.0;
+
     public int ProExpansionStartBytesPerSection { get; set; } = 512;
     public int ProExpansionFactor { get; set; } = 2;
     public int ProExpansionMaxBytesPerSection { get; set; } = 4096;
@@ -21,16 +25,16 @@ public class TrainingConfig
     public int NumberOfLeaves { get; set; } = 31;
     public int MinimumExampleCountPerLeaf { get; set; } = 31;
     public int NumberOfIterations { get; set; } = 800;
-    public double StandardL1Regularization { get; set; } = 0;
-    public double StandardL2Regularization { get; set; } = 0;
+    public double StandardL1Regularization { get; set; } = 0.005;
+    public double StandardL2Regularization { get; set; } = 0.05;
     public int? RandomSeed { get; set; } = 42;
 
     public double FlashLearningRate { get; set; } = 0.1;
     public int FlashNumberOfLeaves { get; set; } = 31;
     public int FlashMinimumExampleCountPerLeaf { get; set; } = 8;
     public int FlashNumberOfIterations { get; set; } = 800;
-    public double FlashL1Regularization { get; set; } = 0;
-    public double FlashL2Regularization { get; set; } = 0;
+    public double FlashL1Regularization { get; set; } = 0.01;
+    public double FlashL2Regularization { get; set; } = 0.2;
 
     public double ProLearningRate { get; set; } = 0.01;
     public int ProNumberOfLeaves { get; set; } = 63;
@@ -48,6 +52,7 @@ public class TrainingConfig
         Console.WriteLine($"迭代次数 (Iterations): {NumberOfIterations}");
         Console.WriteLine($"L1 正则化: {StandardL1Regularization}");
         Console.WriteLine($"L2 正则化: {StandardL2Regularization}");
+        Console.WriteLine($"判毒阈值: {StandardThreshold}%");
         Console.WriteLine($"随机种子: {RandomSeed}");
         Console.WriteLine("========================\n");
     }
@@ -61,6 +66,7 @@ public class TrainingConfig
         Console.WriteLine($"迭代次数 (Iterations): {FlashNumberOfIterations}");
         Console.WriteLine($"L1 正则化: {FlashL1Regularization}");
         Console.WriteLine($"L2 正则化: {FlashL2Regularization}");
+        Console.WriteLine($"判毒阈值: {FlashThreshold}%");
         Console.WriteLine("========================\n");
     }
 
@@ -78,6 +84,7 @@ public class TrainingConfig
         Console.WriteLine($"迭代次数 (Iterations): {ProNumberOfIterations}");
         Console.WriteLine($"L1 正则化: {ProL1Regularization}");
         Console.WriteLine($"L2 正则化: {ProL2Regularization}");
+        Console.WriteLine($"判毒阈值: {ProThreshold}%");
         Console.WriteLine("========================\n");
     }
 }

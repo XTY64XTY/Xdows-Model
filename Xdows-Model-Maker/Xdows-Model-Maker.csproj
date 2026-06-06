@@ -20,4 +20,8 @@
     <PackageReference Include="System.Management" Version="10.0.8" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Xdows-Model-Config\Xdows-Model-Config.csproj" />
+  </ItemGroup>
+
 </Project>
