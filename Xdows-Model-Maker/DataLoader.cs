@@ -212,7 +212,7 @@ public class DataLoader
                     var fileInfo = new FileInfo(file);
                     if (fileInfo.Length < 64)
                         throw new Exception("文件过小，不兼容Pro模型");
-                    ProFeatureExtractor.ExtractFeatures(file, proBytesPerSection);
+                    ProHybridFeatureExtractor.ExtractFeatures(file);
                 }
                 else
                 {

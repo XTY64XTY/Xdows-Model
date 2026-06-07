@@ -96,8 +96,7 @@ namespace Xdows_Model_Invoker
 
             InitializePro(modelPath);
 
-            int featureCount = GetProFeatureDimension();
-            var proFeatures = ProFeatureExtractor.ExtractFeatures(filePath, featureCount / ProFileFeatures.SectionCount);
+            var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(filePath);
             return PredictWithInitializedModel(proFeatures.ToFloatArray());
         }
 
@@ -114,6 +113,15 @@ namespace Xdows_Model_Invoker
         public static void InitializePro(string? modelPath = null)
         {
             InitializeCore(modelPath ?? EnsureModelAvailable(DefaultProModelFileName), ModelMode.Pro);
+            try
+            {
+                ValidateProFeatureDimension();
+            }
+            catch
+            {
+                UnloadModel();
+                throw;
+            }
         }
 
         private static void InitializeCore(string path, ModelMode mode)
@@ -202,7 +210,7 @@ namespace Xdows_Model_Invoker
             int featureCount = _mode switch
             {
                 ModelMode.Flash => FlashFileFeatures.FeatureCount,
-                ModelMode.Pro => GetProFeatureDimension(),
+                ModelMode.Pro => ProHybridFileFeatures.FeatureCount,
                 _ => FileFeatures.FeatureCount
             };
 
@@ -226,8 +234,7 @@ namespace Xdows_Model_Invoker
                     floatFeatures = flashFeatures.ToFloatArray();
                     break;
                 case ModelMode.Pro:
-                    int featureCount = GetProFeatureDimension();
-                    var proFeatures = ProFeatureExtractor.ExtractFeatures(filePath, featureCount / ProFileFeatures.SectionCount);
+                    var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(filePath);
                     floatFeatures = proFeatures.ToFloatArray();
                     break;
                 default:
@@ -241,6 +248,16 @@ namespace Xdows_Model_Invoker
             }
 
             return PredictWithInitializedModel(floatFeatures);
+        }
+
+        private static void ValidateProFeatureDimension()
+        {
+            int featureCount = GetProFeatureDimension();
+            if (featureCount != ProHybridFileFeatures.FeatureCount)
+            {
+                throw new InvalidOperationException(
+                    $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，Pro 混合特征需要 {ProHybridFileFeatures.FeatureCount} 维。请重新训练并导出新的 Xdows-Model-Pro.onnx。");
+            }
         }
 
         private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features, int featureCount, float threshold)

@@ -1031,6 +1031,268 @@ public class ProFileFeatures
     }
 }
 
+public class ProHybridFileFeatures
+{
+    public const int RawBytesPerSection = 512;
+    public const int RawFeatureCount = ProFileFeatures.SectionCount * RawBytesPerSection;
+    public const int StructuralFeatureCount = 32;
+    public const int FeatureCount = FileFeatures.FeatureCount + FlashFileFeatures.FeatureCount + RawFeatureCount + StructuralFeatureCount;
+
+    public float[] Features { get; } = new float[FeatureCount];
+
+    public float[] ToFloatArray()
+    {
+        var result = new float[FeatureCount];
+        Array.Copy(Features, result, FeatureCount);
+        return result;
+    }
+}
+
+public static class ProHybridFeatureExtractor
+{
+    public static ProHybridFileFeatures ExtractFeatures(string filePath)
+    {
+        var bytes = File.ReadAllBytes(filePath);
+        return ExtractFromBytes(bytes);
+    }
+
+    public static ProHybridFileFeatures ExtractFromBytes(byte[] bytes)
+    {
+        if (bytes.Length == 0)
+            throw new NotSupportedException("文件为空");
+
+        if (bytes.Length < 64 || !ByteAnalysisHelper.IsPeFile(bytes))
+            throw new NotSupportedException("不支持该文件类型");
+
+        var result = new ProHybridFileFeatures();
+        int idx = 0;
+
+        CopyInto(FeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
+        CopyInto(FlashFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
+        CopyInto(ProFeatureExtractor.ExtractFromBytes(bytes, ProHybridFileFeatures.RawBytesPerSection).ToFloatArray(), result.Features, ref idx);
+        CopyInto(ExtractStructuralFeatures(bytes), result.Features, ref idx);
+
+        return result;
+    }
+
+    private static void CopyInto(float[] source, float[] destination, ref int offset)
+    {
+        Array.Copy(source, 0, destination, offset, source.Length);
+        offset += source.Length;
+    }
+
+    private static float[] ExtractStructuralFeatures(byte[] bytes)
+    {
+        var features = new float[ProHybridFileFeatures.StructuralFeatureCount];
+        if (!TryReadPeLayout(bytes, out var layout))
+            return features;
+
+        int sectionCount = Math.Max(0, layout.SectionCount);
+        int parsedSections = 0;
+        int executableCount = 0;
+        int writableCount = 0;
+        int readableCount = 0;
+        int codeCount = 0;
+        int initializedDataCount = 0;
+        int uninitializedDataCount = 0;
+        int suspiciousRwxCount = 0;
+        int zeroRawCount = 0;
+        int entrySectionIndex = -1;
+        long lastSectionEnd = 0;
+
+        double entropySum = 0;
+        double entropySquaredSum = 0;
+        double minEntropy = double.MaxValue;
+        double maxEntropy = 0;
+        double rawSizeSum = 0;
+        double maxRawSize = 0;
+        double virtualSizeSum = 0;
+        double maxVirtualSize = 0;
+        double rawVirtualRatioSum = 0;
+        double maxRawVirtualRatio = 0;
+
+        for (int i = 0; i < sectionCount; i++)
+        {
+            int sectionOffset = layout.SectionTableOffset + i * 40;
+            if (sectionOffset < 0 || sectionOffset + 40 > bytes.Length)
+                break;
+
+            uint virtualSize = ReadUInt32(bytes, sectionOffset + 8);
+            uint virtualAddress = ReadUInt32(bytes, sectionOffset + 12);
+            uint rawSize = ReadUInt32(bytes, sectionOffset + 16);
+            uint rawPointer = ReadUInt32(bytes, sectionOffset + 20);
+            uint characteristics = ReadUInt32(bytes, sectionOffset + 36);
+
+            parsedSections++;
+
+            bool executable = (characteristics & 0x20000000) != 0;
+            bool readable = (characteristics & 0x40000000) != 0;
+            bool writable = (characteristics & 0x80000000) != 0;
+
+            if (executable) executableCount++;
+            if (readable) readableCount++;
+            if (writable) writableCount++;
+            if ((characteristics & 0x00000020) != 0) codeCount++;
+            if ((characteristics & 0x00000040) != 0) initializedDataCount++;
+            if ((characteristics & 0x00000080) != 0) uninitializedDataCount++;
+            if (executable && writable) suspiciousRwxCount++;
+            if (rawSize == 0) zeroRawCount++;
+
+            uint effectiveVirtualSize = Math.Max(virtualSize, rawSize);
+            if (entrySectionIndex < 0 &&
+                layout.AddressOfEntryPoint >= virtualAddress &&
+                layout.AddressOfEntryPoint < virtualAddress + effectiveVirtualSize)
+            {
+                entrySectionIndex = i;
+            }
+
+            int availableRawSize = 0;
+            if (rawPointer < bytes.Length)
+                availableRawSize = (int)Math.Min(rawSize, bytes.Length - rawPointer);
+
+            double entropy = availableRawSize > 0
+                ? ByteAnalysisHelper.ComputeRegionEntropy(bytes, (int)rawPointer, availableRawSize)
+                : 0;
+
+            entropySum += entropy;
+            entropySquaredSum += entropy * entropy;
+            minEntropy = Math.Min(minEntropy, entropy);
+            maxEntropy = Math.Max(maxEntropy, entropy);
+
+            rawSizeSum += rawSize;
+            maxRawSize = Math.Max(maxRawSize, rawSize);
+            virtualSizeSum += virtualSize;
+            maxVirtualSize = Math.Max(maxVirtualSize, virtualSize);
+
+            double rawVirtualRatio = virtualSize > 0 ? (double)rawSize / virtualSize : 0;
+            rawVirtualRatioSum += rawVirtualRatio;
+            maxRawVirtualRatio = Math.Max(maxRawVirtualRatio, rawVirtualRatio);
+
+            long sectionEnd = rawPointer + rawSize;
+            if (sectionEnd > lastSectionEnd)
+                lastSectionEnd = sectionEnd;
+        }
+
+        int denominator = Math.Max(parsedSections, 1);
+        double meanEntropy = parsedSections > 0 ? entropySum / parsedSections : 0;
+        double entropyVariance = parsedSections > 0
+            ? Math.Max(0, entropySquaredSum / parsedSections - meanEntropy * meanEntropy)
+            : 0;
+        if (minEntropy == double.MaxValue)
+            minEntropy = 0;
+
+        long overlayBytes = Math.Max(0, bytes.Length - Math.Max(lastSectionEnd, layout.SizeOfHeaders));
+        double overlayRatio = bytes.Length > 0 ? (double)overlayBytes / bytes.Length : 0;
+        double entryRatio = layout.SizeOfImage > 0 ? (double)layout.AddressOfEntryPoint / layout.SizeOfImage : 0;
+
+        int idx = 0;
+        features[idx++] = sectionCount;
+        features[idx++] = (float)executableCount / denominator;
+        features[idx++] = (float)writableCount / denominator;
+        features[idx++] = (float)readableCount / denominator;
+        features[idx++] = (float)codeCount / denominator;
+        features[idx++] = (float)initializedDataCount / denominator;
+        features[idx++] = (float)uninitializedDataCount / denominator;
+        features[idx++] = suspiciousRwxCount;
+        features[idx++] = (float)zeroRawCount / denominator;
+        features[idx++] = entrySectionIndex >= 0 && sectionCount > 0 ? (float)(entrySectionIndex + 1) / sectionCount : 0;
+        features[idx++] = (float)meanEntropy;
+        features[idx++] = (float)minEntropy;
+        features[idx++] = (float)maxEntropy;
+        features[idx++] = (float)entropyVariance;
+        features[idx++] = (float)Math.Log(rawSizeSum / denominator + 1);
+        features[idx++] = (float)Math.Log(maxRawSize + 1);
+        features[idx++] = (float)Math.Log(virtualSizeSum / denominator + 1);
+        features[idx++] = (float)Math.Log(maxVirtualSize + 1);
+        features[idx++] = (float)(rawVirtualRatioSum / denominator);
+        features[idx++] = (float)maxRawVirtualRatio;
+        features[idx++] = (float)Math.Log(layout.SizeOfImage + 1);
+        features[idx++] = (float)Math.Log(layout.SizeOfCode + 1);
+        features[idx++] = (float)Math.Log(layout.SizeOfInitializedData + 1);
+        features[idx++] = (float)Math.Log(layout.SizeOfUninitializedData + 1);
+        features[idx++] = layout.Subsystem;
+        features[idx++] = layout.DllCharacteristics;
+        features[idx++] = layout.Characteristics;
+        features[idx++] = bytes.Length > 0 ? (float)layout.PeOffset / bytes.Length : 0;
+        features[idx++] = bytes.Length > 0 ? (float)layout.SizeOfHeaders / bytes.Length : 0;
+        features[idx++] = (float)entryRatio;
+        features[idx++] = overlayBytes > 0 ? 1 : 0;
+        features[idx++] = (float)overlayRatio;
+
+        return features;
+    }
+
+    private static bool TryReadPeLayout(byte[] bytes, out PeLayout layout)
+    {
+        layout = default;
+        if (bytes.Length < 64)
+            return false;
+
+        int peOffset = BitConverter.ToInt32(bytes, 60);
+        if (peOffset < 0 || peOffset + 24 > bytes.Length || bytes[peOffset] != 'P' || bytes[peOffset + 1] != 'E')
+            return false;
+
+        ushort characteristics = ReadUInt16(bytes, peOffset + 22);
+        ushort sectionCount = ReadUInt16(bytes, peOffset + 6);
+        ushort optionalHeaderSize = ReadUInt16(bytes, peOffset + 20);
+        int optionalHeaderOffset = peOffset + 24;
+        int sectionTableOffset = optionalHeaderOffset + optionalHeaderSize;
+
+        if (optionalHeaderOffset + 2 > bytes.Length)
+            return false;
+
+        ushort magic = ReadUInt16(bytes, optionalHeaderOffset);
+        bool pe32 = magic == 0x10b;
+        uint addressOfEntryPoint = ReadUInt32(bytes, optionalHeaderOffset + 16);
+        uint sizeOfCode = ReadUInt32(bytes, optionalHeaderOffset + 4);
+        uint sizeOfInitializedData = ReadUInt32(bytes, optionalHeaderOffset + 8);
+        uint sizeOfUninitializedData = ReadUInt32(bytes, optionalHeaderOffset + 12);
+        uint sizeOfImage = ReadUInt32(bytes, optionalHeaderOffset + 56);
+        uint sizeOfHeaders = ReadUInt32(bytes, optionalHeaderOffset + 60);
+        ushort subsystem = ReadUInt16(bytes, optionalHeaderOffset + (pe32 ? 68 : 88));
+        ushort dllCharacteristics = ReadUInt16(bytes, optionalHeaderOffset + (pe32 ? 70 : 90));
+
+        layout = new PeLayout(
+            peOffset,
+            sectionTableOffset,
+            sectionCount,
+            characteristics,
+            addressOfEntryPoint,
+            sizeOfImage,
+            sizeOfHeaders,
+            sizeOfCode,
+            sizeOfInitializedData,
+            sizeOfUninitializedData,
+            subsystem,
+            dllCharacteristics);
+        return true;
+    }
+
+    private static ushort ReadUInt16(byte[] bytes, int offset)
+    {
+        return offset >= 0 && offset + 2 <= bytes.Length ? BitConverter.ToUInt16(bytes, offset) : (ushort)0;
+    }
+
+    private static uint ReadUInt32(byte[] bytes, int offset)
+    {
+        return offset >= 0 && offset + 4 <= bytes.Length ? BitConverter.ToUInt32(bytes, offset) : 0;
+    }
+
+    private readonly record struct PeLayout(
+        int PeOffset,
+        int SectionTableOffset,
+        int SectionCount,
+        ushort Characteristics,
+        uint AddressOfEntryPoint,
+        uint SizeOfImage,
+        uint SizeOfHeaders,
+        uint SizeOfCode,
+        uint SizeOfInitializedData,
+        uint SizeOfUninitializedData,
+        ushort Subsystem,
+        ushort DllCharacteristics);
+}
+
 public class ProFeatureExtractor
 {
     private const int PeCheckSize = 512;

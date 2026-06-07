@@ -4,8 +4,6 @@ namespace Xdows_Model_Maker;
 
 internal class Program
 {
-    private static CancellationTokenSource? _proCts;
-
     private enum MenuItemType
     {
         Header,
@@ -271,46 +269,30 @@ internal class Program
             if (trainPro)
             {
                 Console.WriteLine("\n=============================================");
-                Console.WriteLine("  开始训练 Pro 模型...");
-                Console.WriteLine("  提示：按 S 键可随时停止并保存当前最优模型");
+                Console.WriteLine("  开始训练 Pro 混合特征模型...");
                 Console.WriteLine("=============================================");
                 config.PrintProConfig();
 
-                _proCts = new CancellationTokenSource();
-                var keyboardThread = new Thread(() => ProKeyboardListener(trainer, _proCts));
-                keyboardThread.IsBackground = true;
-                keyboardThread.Start();
+                var (proModel, optimalBytesPerSection) = trainer.TrainProModel(data);
 
-                try
+                if (proModel == null)
                 {
-                    var (proModel, optimalBytesPerSection) = trainer.TrainProModel(data);
-
-                    if (proModel == null)
-                    {
-                        Console.WriteLine("\nPro 模型训练失败，跳过预测测试。");
-                    }
-                    else
-                    {
-                        Console.WriteLine("\n对部分样本进行 Pro 预测测试:");
-                        foreach (var sample in testSamples)
-                            trainer.PredictPro(proModel, sample, optimalBytesPerSection);
-                    }
-
-                    Console.WriteLine("\n=============================================");
-                    Console.WriteLine("  Pro 模型训练完成！");
-                    Console.WriteLine($"  Pro ML.NET 模型已保存至: {config.ProModelPath}");
-                    Console.WriteLine($"  Pro ONNX 模型已保存至: {config.ProOnnxPath}");
-                    Console.WriteLine($"  最优每段字节数: {optimalBytesPerSection}");
-                    Console.WriteLine($"  最优特征维度: {ProFileFeatures.SectionCount * optimalBytesPerSection}");
-                    Console.WriteLine("=============================================");
+                    Console.WriteLine("\nPro 模型训练失败，跳过预测测试。");
                 }
-                finally
+                else
                 {
-                    _proCts?.Cancel();
-                    keyboardThread.Join(500);
-                    _proCts?.Dispose();
-                    _proCts = null;
+                    Console.WriteLine("\n对部分样本进行 Pro 预测测试:");
+                    foreach (var sample in testSamples)
+                        trainer.PredictPro(proModel, sample, optimalBytesPerSection);
                 }
+
+                Console.WriteLine("\n=============================================");
+                Console.WriteLine("  Pro 模型训练完成！");
+                Console.WriteLine($"  Pro ML.NET 模型已保存至: {config.ProModelPath}");
+                Console.WriteLine($"  Pro ONNX 模型已保存至: {config.ProOnnxPath}");
+                Console.WriteLine($"  Raw 每段字节数: {optimalBytesPerSection}");
+                Console.WriteLine($"  最优特征维度: {ProHybridFileFeatures.FeatureCount}");
+                Console.WriteLine("=============================================");
             }
 
             if ((trainFlash && trainStandard) || trainPro || (trainFlash && trainStandard && trainPro))
@@ -346,24 +328,6 @@ internal class Program
         {
             Console.WriteLine($"\n发生错误: {ex.Message}");
             Console.WriteLine($"堆栈跟踪: {ex.StackTrace}");
-        }
-    }
-
-    private static void ProKeyboardListener(ModelTrainer trainer, CancellationTokenSource cts)
-    {
-        while (!cts.Token.IsCancellationRequested)
-        {
-            if (Console.KeyAvailable)
-            {
-                var key = Console.ReadKey(intercept: true);
-                if (key.Key == ConsoleKey.S)
-                {
-                    Console.WriteLine("\n[系统] 检测到停止请求 (S键)，将在当前步骤完成后保存最优模型并停止...");
-                    trainer.CancelProTraining();
-                    break;
-                }
-            }
-            Thread.Sleep(100);
         }
     }
 

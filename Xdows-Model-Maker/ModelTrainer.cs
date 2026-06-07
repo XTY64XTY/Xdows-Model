@@ -54,85 +54,33 @@ public class ModelTrainer
 
     private (ITransformer model, int optimalBytesPerSection) TrainProWithProgressiveExpansion(List<FileData> fileData, string modelPath, string? onnxPath)
     {
-        Console.WriteLine("\n开始训练 Pro 模型（渐进式扩展）...");
-        Console.WriteLine("提示：训练过程中按 'S' 键可随时停止并保存当前最优模型。\n");
+        Console.WriteLine("\n开始训练 Pro 混合特征模型...");
+        Console.WriteLine($"特征组成：Standard {FileFeatures.FeatureCount} 维 + Flash {FlashFileFeatures.FeatureCount} 维 + Raw {ProHybridFileFeatures.RawFeatureCount} 维 + PE结构 {ProHybridFileFeatures.StructuralFeatureCount} 维");
+        Console.WriteLine($"Pro 总特征维度：{ProHybridFileFeatures.FeatureCount}\n");
 
-        int currentBytesPerSection = _config.ProExpansionStartBytesPerSection;
-        int maxBytesPerSection = _config.ProExpansionMaxBytesPerSection;
-        double aucThreshold = _config.ProExpansionAucThreshold;
-        int patience = _config.ProExpansionPatience;
-
-        ITransformer bestModel = null!;
-        int bestBytesPerSection = currentBytesPerSection;
-        double bestAuc = 0;
-        int noImprovementCount = 0;
-        IDataView? bestDataView = null;
-
-        while (currentBytesPerSection <= maxBytesPerSection)
+        if (_proTrainingCancelled)
         {
-            if (_proTrainingCancelled)
-            {
-                Console.WriteLine("\n检测到停止信号，正在保存当前最优模型...");
-                break;
-            }
-
-            int featureCount = ProFileFeatures.SectionCount * currentBytesPerSection;
-            Console.WriteLine($"\n--- Pro 渐进式扩展：每段 {currentBytesPerSection} 字节，特征维度 {featureCount} ---");
-
-            var (model, auc, dataView) = TrainProStep(fileData, currentBytesPerSection);
-
-            if (_proTrainingCancelled)
-            {
-                Console.WriteLine("\n检测到停止信号，正在保存当前最优模型...");
-                if (model != null && dataView != null && auc > bestAuc)
-                {
-                    bestAuc = auc;
-                    bestModel = model;
-                    bestBytesPerSection = currentBytesPerSection;
-                    bestDataView = dataView;
-                }
-                break;
-            }
-
-            if (auc > bestAuc + aucThreshold)
-            {
-                bestAuc = auc;
-                bestModel = model;
-                bestBytesPerSection = currentBytesPerSection;
-                bestDataView = dataView;
-                noImprovementCount = 0;
-                Console.WriteLine($"  AUC 提升：{auc:P4}（最佳）");
-            }
-            else
-            {
-                noImprovementCount++;
-                Console.WriteLine($"  AUC 未显著提升：{auc:P4}（连续 {noImprovementCount}/{patience} 步）");
-
-                if (noImprovementCount >= patience)
-                {
-                    Console.WriteLine($"  连续 {patience} 步无显著提升，停止扩展。");
-                    break;
-                }
-            }
-
-            currentBytesPerSection *= _config.ProExpansionFactor;
+            Console.WriteLine("Pro 训练已取消。");
+            return (null!, ProHybridFileFeatures.RawBytesPerSection);
         }
 
-        if (bestModel == null || bestDataView == null)
+        var (model, auc, dataView) = TrainProStep(fileData, ProHybridFileFeatures.RawBytesPerSection);
+
+        if (model == null || dataView == null)
         {
-            Console.WriteLine("警告：Pro 模型渐进式扩展未产生有效模型。");
-            return (null!, bestBytesPerSection);
+            Console.WriteLine("警告：Pro 混合特征模型未产生有效模型。");
+            return (null!, ProHybridFileFeatures.RawBytesPerSection);
         }
 
         Console.WriteLine($"\n正在保存最优 Pro 模型...");
-        _mlContext.Model.Save(bestModel, bestDataView.Schema, modelPath);
+        _mlContext.Model.Save(model, dataView.Schema, modelPath);
         Console.WriteLine($"Pro ML.NET 模型已保存至: {modelPath}");
 
         if (!string.IsNullOrEmpty(onnxPath))
         {
             try
             {
-                ExportToOnnx(bestModel, bestDataView, onnxPath);
+                ExportToOnnx(model, dataView, onnxPath);
                 Console.WriteLine($"Pro ONNX 模型已保存至: {onnxPath}");
             }
             catch (Exception ex)
@@ -141,17 +89,17 @@ public class ModelTrainer
             }
         }
 
-        Console.WriteLine($"\n=== Pro 模型渐进式扩展完成 ===");
-        Console.WriteLine($"最优每段字节数：{bestBytesPerSection}");
-        Console.WriteLine($"最优特征维度：{ProFileFeatures.SectionCount * bestBytesPerSection}");
-        Console.WriteLine($"最优 AUC：{bestAuc:P4}");
+        Console.WriteLine($"\n=== Pro 混合特征模型训练完成 ===");
+        Console.WriteLine($"Raw 每段字节数：{ProHybridFileFeatures.RawBytesPerSection}");
+        Console.WriteLine($"最终特征维度：{ProHybridFileFeatures.FeatureCount}");
+        Console.WriteLine($"AUC：{auc:P4}");
 
-        return (bestModel, bestBytesPerSection);
+        return (model, ProHybridFileFeatures.RawBytesPerSection);
     }
 
     private (ITransformer model, double auc, IDataView dataView) TrainProStep(List<FileData> fileData, int bytesPerSection)
     {
-        int featureCount = ProFileFeatures.SectionCount * bytesPerSection;
+        int featureCount = ProHybridFileFeatures.FeatureCount;
 
         var validData = new List<FileData>();
         var validFeatures = new List<float[]>();
@@ -161,7 +109,7 @@ public class ModelTrainer
         {
             try
             {
-                var proFeatures = ProFeatureExtractor.ExtractFeatures(fd.FilePath, bytesPerSection);
+                var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fd.FilePath);
                 var floatArray = proFeatures.ToFloatArray();
                 if (floatArray.Length != featureCount)
                 {
@@ -226,9 +174,12 @@ public class ModelTrainer
             auc = metrics.AreaUnderRocCurve;
             var rows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(predictions, reuseRowObject: false).ToList();
             var thresholdMetrics = ComputeThresholdMetrics(rows, _config.ProThreshold);
+            var (bestThreshold, bestThresholdMetrics) = FindBestThreshold(rows);
             Console.WriteLine($"  阈值: {_config.ProThreshold:F2}%");
             Console.WriteLine($"  准确率: {thresholdMetrics.Accuracy:P4}，AUC: {auc:P4}，F1: {thresholdMetrics.F1Score:P4}");
             Console.WriteLine($"  检出率: {thresholdMetrics.TruePositiveRate:P4}，误报率: {thresholdMetrics.FalsePositiveRate:P4}，BrewTotal 代理分数: {thresholdMetrics.BrewTotalProxyScore:F2}");
+            Console.WriteLine($"  最优代理阈值: {bestThreshold:F2}%");
+            Console.WriteLine($"  最优代理检出率: {bestThresholdMetrics.TruePositiveRate:P4}，误报率: {bestThresholdMetrics.FalsePositiveRate:P4}，BrewTotal 代理分数: {bestThresholdMetrics.BrewTotalProxyScore:F2}");
         }
         catch (ArgumentOutOfRangeException)
         {
@@ -262,12 +213,12 @@ public class ModelTrainer
 
     public void PredictPro(ITransformer model, FileData fileData, int bytesPerSection)
     {
-        int featureCount = ProFileFeatures.SectionCount * bytesPerSection;
-        var proFeatures = ProFeatureExtractor.ExtractFeatures(fileData.FilePath, bytesPerSection);
+        int featureCount = ProHybridFileFeatures.FeatureCount;
+        var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fileData.FilePath);
         var schemaDef = SchemaDefinition.Create(typeof(ProBinaryTrainingData));
         schemaDef["Features"].ColumnType = new VectorDataViewType(NumberDataViewType.Single, featureCount);
         var predictionEngine = _mlContext.Model.CreatePredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>(model, inputSchemaDefinition: schemaDef);
-        var prediction = predictionEngine.Predict(new ProBinaryTrainingData(bytesPerSection)
+        var prediction = predictionEngine.Predict(new ProBinaryTrainingData(featureCount)
         {
             Features = proFeatures.ToFloatArray(),
             Label = fileData.Label
@@ -490,6 +441,24 @@ public class ModelTrainer
             falsePositiveRate,
             f1Score,
             brewTotalProxyScore);
+    }
+
+    private static (double threshold, ThresholdMetrics metrics) FindBestThreshold(List<ThresholdEvaluationRow> rows)
+    {
+        double bestThreshold = 50;
+        ThresholdMetrics? bestMetrics = null;
+
+        for (double threshold = 50; threshold <= 99.9; threshold += 0.1)
+        {
+            var metrics = ComputeThresholdMetrics(rows, threshold);
+            if (bestMetrics == null || metrics.BrewTotalProxyScore > bestMetrics.BrewTotalProxyScore)
+            {
+                bestThreshold = threshold;
+                bestMetrics = metrics;
+            }
+        }
+
+        return (bestThreshold, bestMetrics ?? ComputeThresholdMetrics(rows, bestThreshold));
     }
 
     public void Predict(ITransformer model, FileData fileData)

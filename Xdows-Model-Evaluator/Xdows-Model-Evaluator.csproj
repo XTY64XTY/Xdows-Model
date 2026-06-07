@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RootNamespace>Xdows_Model_Evaluator</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Xdows-Model-Config\Xdows-Model-Config.csproj" />
+    <ProjectReference Include="..\Xdows-Model-Invoker\Xdows-Model-Invoker.csproj" />
+  </ItemGroup>
+
+</Project>
