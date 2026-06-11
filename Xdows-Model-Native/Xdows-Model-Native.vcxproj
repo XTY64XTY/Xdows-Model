@@ -68,16 +68,29 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <XdowsOnnxRuntimeVersion>1.26.0</XdowsOnnxRuntimeVersion>
+    <NuGetPackageRoot Condition="'$(NuGetPackageRoot)' == '' And Exists('D:\NuGetPackages\microsoft.ml.onnxruntime\$(XdowsOnnxRuntimeVersion)\')">D:\NuGetPackages\</NuGetPackageRoot>
+    <NuGetPackageRoot Condition="'$(NuGetPackageRoot)' == ''">$(UserProfile)\.nuget\packages\</NuGetPackageRoot>
+    <XdowsOnnxRuntimePackageRoot>$(NuGetPackageRoot)microsoft.ml.onnxruntime\$(XdowsOnnxRuntimeVersion)\</XdowsOnnxRuntimePackageRoot>
+    <XdowsOnnxRuntimeRid Condition="'$(Platform)' == 'ARM64'">arm64</XdowsOnnxRuntimeRid>
+    <XdowsOnnxRuntimeRid Condition="'$(XdowsOnnxRuntimeRid)' == ''">x64</XdowsOnnxRuntimeRid>
+  </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>include;$(XdowsOnnxRuntimePackageRoot)build\native\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>XDOWS_MODEL_NATIVE_EXPORTS;WIN32_LEAN_AND_MEAN;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <AdditionalLibraryDirectories>$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>onnxruntime.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>if exist "$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native\onnxruntime.dll" copy /Y "$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native\onnxruntime.dll" "$(OutDir)"&#xD;&#xA;if exist "$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native\onnxruntime_providers_shared.dll" copy /Y "$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native\onnxruntime_providers_shared.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="include\xdows_model_native.h" />
