@@ -1,6 +1,8 @@
-#define XDOWS_MODEL_NATIVE_EXPORTS
-
 #include "xdows_model_native.h"
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
 #include <Windows.h>
 #include <objbase.h>
