@@ -23,6 +23,7 @@ namespace Xdows_Model_Invoker
         private static string? _loadedModelPath;
         private static ModelMode _mode = ModelMode.Standard;
         private static int? _proFeatureDimension;
+        private static int? _proRawBytesPerSection;
         private static float _standardThreshold = NormalizeThreshold((float)_defaultConfig.StandardThreshold);
         private static float _flashThreshold = NormalizeThreshold((float)_defaultConfig.FlashThreshold);
         private static float _proThreshold = NormalizeThreshold((float)_defaultConfig.ProThreshold);
@@ -96,7 +97,7 @@ namespace Xdows_Model_Invoker
 
             InitializePro(modelPath);
 
-            var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(filePath);
+            var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(filePath, GetProRawBytesPerSection());
             return PredictWithInitializedModel(proFeatures.ToFloatArray());
         }
 
@@ -136,6 +137,7 @@ namespace Xdows_Model_Invoker
                 _loadedModelPath = path;
                 _mode = mode;
                 _proFeatureDimension = null;
+                _proRawBytesPerSection = null;
             }
         }
 
@@ -172,6 +174,7 @@ namespace Xdows_Model_Invoker
                 _loadedModelPath = null;
                 _mode = ModelMode.Standard;
                 _proFeatureDimension = null;
+                _proRawBytesPerSection = null;
             }
         }
 
@@ -202,6 +205,22 @@ namespace Xdows_Model_Invoker
             throw new InvalidOperationException("无法从 ONNX 模型元数据中读取 Pro 模型特征维度");
         }
 
+        private static int GetProRawBytesPerSection()
+        {
+            if (_proRawBytesPerSection.HasValue)
+                return _proRawBytesPerSection.Value;
+
+            int featureCount = GetProFeatureDimension();
+            if (!ProHybridFileFeatures.TryGetRawBytesPerSection(featureCount, out int bytesPerSection))
+            {
+                throw new InvalidOperationException(
+                    $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，无法解析为 Pro 混合动态特征。");
+            }
+
+            _proRawBytesPerSection = bytesPerSection;
+            return bytesPerSection;
+        }
+
         private static (bool isVirus, float probability) PredictWithInitializedModel(float[] features)
         {
             if (_session == null)
@@ -210,7 +229,7 @@ namespace Xdows_Model_Invoker
             int featureCount = _mode switch
             {
                 ModelMode.Flash => FlashFileFeatures.FeatureCount,
-                ModelMode.Pro => ProHybridFileFeatures.FeatureCount,
+                ModelMode.Pro => GetProFeatureDimension(),
                 _ => FileFeatures.FeatureCount
             };
 
@@ -234,7 +253,7 @@ namespace Xdows_Model_Invoker
                     floatFeatures = flashFeatures.ToFloatArray();
                     break;
                 case ModelMode.Pro:
-                    var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(filePath);
+                    var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(filePath, GetProRawBytesPerSection());
                     floatFeatures = proFeatures.ToFloatArray();
                     break;
                 default:
@@ -253,11 +272,13 @@ namespace Xdows_Model_Invoker
         private static void ValidateProFeatureDimension()
         {
             int featureCount = GetProFeatureDimension();
-            if (featureCount != ProHybridFileFeatures.FeatureCount)
+            if (!ProHybridFileFeatures.TryGetRawBytesPerSection(featureCount, out int bytesPerSection))
             {
                 throw new InvalidOperationException(
-                    $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，Pro 混合特征需要 {ProHybridFileFeatures.FeatureCount} 维。请重新训练并导出新的 Xdows-Model-Pro.onnx。");
+                    $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，无法解析为 Pro 混合动态特征。请重新训练并导出新的 Xdows-Model-Pro.onnx。");
             }
+
+            _proRawBytesPerSection = bytesPerSection;
         }
 
         private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features, int featureCount, float threshold)

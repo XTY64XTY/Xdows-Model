@@ -24,11 +24,11 @@ namespace
 {
     constexpr int kStandardFeatureCount = 299;
     constexpr int kFlashFeatureCount = 68;
-    constexpr int kProRawBytesPerSection = 512;
-    constexpr int kProRawFeatureCount = 3 * kProRawBytesPerSection;
+    constexpr int kDefaultProRawBytesPerSection = 512;
     constexpr int kProStructuralFeatureCount = 32;
+    constexpr int kProFixedFeatureCount = kStandardFeatureCount + kFlashFeatureCount + kProStructuralFeatureCount;
     constexpr int kProHybridFeatureCount =
-        kStandardFeatureCount + kFlashFeatureCount + kProRawFeatureCount + kProStructuralFeatureCount;
+        kProFixedFeatureCount + 3 * kDefaultProRawBytesPerSection;
     constexpr size_t kFlashRegionSize = 512ULL * 1024ULL;
     constexpr size_t kBlockEntropyRegionSize = 128ULL * 1024ULL;
 
@@ -83,6 +83,24 @@ namespace
             Options.SetIntraOpNumThreads(1);
             Options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
             Session = std::make_unique<Ort::Session>(Env, ModelPath.c_str(), Options);
+
+            Ort::AllocatorWithDefaultOptions allocator;
+            size_t inputCount = Session->GetInputCount();
+            for (size_t i = 0; i < inputCount; i++)
+            {
+                auto inputName = Session->GetInputNameAllocated(i, allocator);
+                if (std::strcmp(inputName.get(), "Features") != 0)
+                    continue;
+
+                Ort::TypeInfo typeInfo = Session->GetInputTypeInfo(i);
+                auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
+                auto shape = tensorInfo.GetShape();
+                if (shape.size() == 2 && shape[1] > 0)
+                    FeatureCount = static_cast<int>(shape[1]);
+                else if (shape.size() == 1 && shape[0] > 0)
+                    FeatureCount = static_cast<int>(shape[0]);
+                break;
+            }
         }
     };
 
@@ -754,30 +772,40 @@ namespace
             features.push_back(peValue);
     }
 
-    void AppendProRawFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
+    bool TryGetProRawBytesPerSection(int featureCount, size_t& bytesPerSection)
+    {
+        int rawFeatureCount = featureCount - kProFixedFeatureCount;
+        if (rawFeatureCount <= 0 || rawFeatureCount % 3 != 0)
+            return false;
+
+        bytesPerSection = static_cast<size_t>(rawFeatureCount / 3);
+        return true;
+    }
+
+    void AppendProRawFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features, size_t bytesPerSection)
     {
         size_t base = features.size();
-        features.resize(base + kProRawFeatureCount, 0.0f);
+        features.resize(base + 3 * bytesPerSection, 0.0f);
 
         auto copySection = [&](size_t sourceStart, size_t length, size_t targetOffset)
         {
-            size_t maxLength = std::min(length, static_cast<size_t>(kProRawBytesPerSection));
+            size_t maxLength = std::min(length, bytesPerSection);
             for (size_t i = 0; i < maxLength && sourceStart + i < bytes.size(); i++)
                 features[base + targetOffset + i] = static_cast<float>(bytes[sourceStart + i]);
         };
 
         size_t fileSize = bytes.size();
-        size_t headLength = std::min(fileSize, static_cast<size_t>(kProRawBytesPerSection));
-        size_t midStart = fileSize / 2 > kProRawBytesPerSection / 2
-            ? fileSize / 2 - kProRawBytesPerSection / 2
+        size_t headLength = std::min(fileSize, bytesPerSection);
+        size_t midStart = fileSize / 2 > bytesPerSection / 2
+            ? fileSize / 2 - bytesPerSection / 2
             : 0;
-        size_t midLength = std::min(midStart + kProRawBytesPerSection, fileSize) - midStart;
-        size_t tailStart = fileSize > kProRawBytesPerSection ? fileSize - kProRawBytesPerSection : 0;
+        size_t midLength = std::min(midStart + bytesPerSection, fileSize) - midStart;
+        size_t tailStart = fileSize > bytesPerSection ? fileSize - bytesPerSection : 0;
         size_t tailLength = fileSize - tailStart;
 
         copySection(0, headLength, 0);
-        copySection(midStart, midLength, kProRawBytesPerSection);
-        copySection(tailStart, tailLength, kProRawBytesPerSection * 2);
+        copySection(midStart, midLength, bytesPerSection);
+        copySection(tailStart, tailLength, bytesPerSection * 2);
     }
 
     void AppendProStructuralFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
@@ -931,7 +959,7 @@ namespace
         features.insert(features.end(), values.begin(), values.end());
     }
 
-    bool ExtractFeaturesForMode(int mode, const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
+    bool ExtractFeaturesForMode(int mode, int featureCount, const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
     {
         if (!IsPeFile(bytes))
             return false;
@@ -943,18 +971,24 @@ namespace
             AppendFlashFeatures(bytes, features);
             return features.size() == kFlashFeatureCount;
         case XdowsModelNativeModePro:
+        {
+            size_t bytesPerSection = 0;
+            if (!TryGetProRawBytesPerSection(featureCount, bytesPerSection))
+                return false;
+
             AppendStandardFeatures(bytes, features);
             AppendFlashFeatures(bytes, features);
-            AppendProRawFeatures(bytes, features);
+            AppendProRawFeatures(bytes, features, bytesPerSection);
             AppendProStructuralFeatures(bytes, features);
-            return features.size() == kProHybridFeatureCount;
+            return features.size() == static_cast<size_t>(featureCount);
+        }
         default:
             AppendStandardFeatures(bytes, features);
             return features.size() == kStandardFeatureCount;
         }
     }
 
-    int FeatureCountForMode(int mode)
+    int DefaultFeatureCountForMode(int mode)
     {
         switch (mode)
         {
@@ -1173,7 +1207,7 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
 
     try
     {
-        auto nativeSession = std::make_unique<NativeSession>(mode, FeatureCountForMode(mode), modelPath);
+        auto nativeSession = std::make_unique<NativeSession>(mode, DefaultFeatureCountForMode(mode), modelPath);
         *session = nativeSession.release();
         return XdowsModelNativeStatusOk;
     }
@@ -1226,7 +1260,7 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeScanFile(
     }
 
     std::vector<float> features;
-    if (!ExtractFeaturesForMode(nativeSession->Mode, bytes, features))
+    if (!ExtractFeaturesForMode(nativeSession->Mode, nativeSession->FeatureCount, bytes, features))
     {
         SetError(result, XdowsModelNativeStatusUnsupportedFile, L"feature-extraction-failed");
         return XdowsModelNativeStatusUnsupportedFile;

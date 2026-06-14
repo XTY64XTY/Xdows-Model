@@ -291,7 +291,7 @@ internal class Program
                 Console.WriteLine($"  Pro ML.NET 模型已保存至: {config.ProModelPath}");
                 Console.WriteLine($"  Pro ONNX 模型已保存至: {config.ProOnnxPath}");
                 Console.WriteLine($"  Raw 每段字节数: {optimalBytesPerSection}");
-                Console.WriteLine($"  最优特征维度: {ProHybridFileFeatures.FeatureCount}");
+                Console.WriteLine($"  最优特征维度: {ProHybridFileFeatures.GetFeatureCount(optimalBytesPerSection)}");
                 Console.WriteLine("=============================================");
             }
 

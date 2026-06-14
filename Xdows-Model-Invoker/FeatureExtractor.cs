@@ -1037,30 +1037,61 @@ public class ProFileFeatures
 
 public class ProHybridFileFeatures
 {
-    public const int RawBytesPerSection = 512;
-    public const int RawFeatureCount = ProFileFeatures.SectionCount * RawBytesPerSection;
+    public const int DefaultRawBytesPerSection = 512;
     public const int StructuralFeatureCount = 32;
-    public const int FeatureCount = FileFeatures.FeatureCount + FlashFileFeatures.FeatureCount + RawFeatureCount + StructuralFeatureCount;
+    public const int FixedFeatureCount = FileFeatures.FeatureCount + FlashFileFeatures.FeatureCount + StructuralFeatureCount;
+    public static int RawBytesPerSection => DefaultRawBytesPerSection;
+    public static int RawFeatureCount => GetRawFeatureCount(DefaultRawBytesPerSection);
+    public static int FeatureCount => GetFeatureCount(DefaultRawBytesPerSection);
 
-    public float[] Features { get; } = new float[FeatureCount];
+    public int BytesPerSection { get; }
+    public int FeatureLength { get; }
+    public float[] Features { get; }
+
+    public ProHybridFileFeatures(int bytesPerSection = DefaultRawBytesPerSection)
+    {
+        if (bytesPerSection <= 0)
+            throw new ArgumentOutOfRangeException(nameof(bytesPerSection), "Raw bytes per section must be positive.");
+
+        BytesPerSection = bytesPerSection;
+        FeatureLength = GetFeatureCount(bytesPerSection);
+        Features = new float[FeatureLength];
+    }
+
+    public static int GetRawFeatureCount(int bytesPerSection) => ProFileFeatures.SectionCount * bytesPerSection;
+
+    public static int GetFeatureCount(int bytesPerSection) => FixedFeatureCount + GetRawFeatureCount(bytesPerSection);
+
+    public static bool TryGetRawBytesPerSection(int featureCount, out int bytesPerSection)
+    {
+        int rawFeatureCount = featureCount - FixedFeatureCount;
+        if (rawFeatureCount > 0 && rawFeatureCount % ProFileFeatures.SectionCount == 0)
+        {
+            bytesPerSection = rawFeatureCount / ProFileFeatures.SectionCount;
+            return true;
+        }
+
+        bytesPerSection = 0;
+        return false;
+    }
 
     public float[] ToFloatArray()
     {
-        var result = new float[FeatureCount];
-        Array.Copy(Features, result, FeatureCount);
+        var result = new float[FeatureLength];
+        Array.Copy(Features, result, FeatureLength);
         return result;
     }
 }
 
 public static class ProHybridFeatureExtractor
 {
-    public static ProHybridFileFeatures ExtractFeatures(string filePath)
+    public static ProHybridFileFeatures ExtractFeatures(string filePath, int bytesPerSection = ProHybridFileFeatures.DefaultRawBytesPerSection)
     {
         var bytes = File.ReadAllBytes(filePath);
-        return ExtractFromBytes(bytes);
+        return ExtractFromBytes(bytes, bytesPerSection);
     }
 
-    public static ProHybridFileFeatures ExtractFromBytes(byte[] bytes)
+    public static ProHybridFileFeatures ExtractFromBytes(byte[] bytes, int bytesPerSection = ProHybridFileFeatures.DefaultRawBytesPerSection)
     {
         if (bytes.Length == 0)
             throw new NotSupportedException("文件为空");
@@ -1068,12 +1099,12 @@ public static class ProHybridFeatureExtractor
         if (bytes.Length < 64 || !ByteAnalysisHelper.IsPeFile(bytes))
             throw new NotSupportedException("不支持该文件类型");
 
-        var result = new ProHybridFileFeatures();
+        var result = new ProHybridFileFeatures(bytesPerSection);
         int idx = 0;
 
         CopyInto(FeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
         CopyInto(FlashFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
-        CopyInto(ProFeatureExtractor.ExtractFromBytes(bytes, ProHybridFileFeatures.RawBytesPerSection).ToFloatArray(), result.Features, ref idx);
+        CopyInto(ProFeatureExtractor.ExtractFromBytes(bytes, bytesPerSection).ToFloatArray(), result.Features, ref idx);
         CopyInto(ExtractStructuralFeatures(bytes), result.Features, ref idx);
 
         return result;

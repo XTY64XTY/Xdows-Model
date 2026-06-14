@@ -55,32 +55,82 @@ public class ModelTrainer
     private (ITransformer model, int optimalBytesPerSection) TrainProWithProgressiveExpansion(List<FileData> fileData, string modelPath, string? onnxPath)
     {
         Console.WriteLine("\n开始训练 Pro 混合特征模型...");
-        Console.WriteLine($"特征组成：Standard {FileFeatures.FeatureCount} 维 + Flash {FlashFileFeatures.FeatureCount} 维 + Raw {ProHybridFileFeatures.RawFeatureCount} 维 + PE结构 {ProHybridFileFeatures.StructuralFeatureCount} 维");
-        Console.WriteLine($"Pro 总特征维度：{ProHybridFileFeatures.FeatureCount}\n");
+        Console.WriteLine($"固定特征组成：Standard {FileFeatures.FeatureCount} 维 + Flash {FlashFileFeatures.FeatureCount} 维 + PE结构 {ProHybridFileFeatures.StructuralFeatureCount} 维");
+        Console.WriteLine($"Raw 动态搜索：{_config.ProExpansionStartBytesPerSection} -> {_config.ProExpansionMaxBytesPerSection} 字节/段，扩展因子 {_config.ProExpansionFactor}\n");
 
         if (_proTrainingCancelled)
         {
             Console.WriteLine("Pro 训练已取消。");
-            return (null!, ProHybridFileFeatures.RawBytesPerSection);
+            return (null!, _config.ProExpansionStartBytesPerSection);
         }
 
-        var (model, auc, dataView) = TrainProStep(fileData, ProHybridFileFeatures.RawBytesPerSection);
+        ITransformer? bestModel = null;
+        IDataView? bestDataView = null;
+        double bestAuc = double.NegativeInfinity;
+        int bestBytesPerSection = _config.ProExpansionStartBytesPerSection;
+        int staleSteps = 0;
 
-        if (model == null || dataView == null)
+        int bytesPerSection = _config.ProExpansionStartBytesPerSection;
+        int expansionFactor = Math.Max(2, _config.ProExpansionFactor);
+        int maxBytesPerSection = Math.Max(bytesPerSection, _config.ProExpansionMaxBytesPerSection);
+
+        while (bytesPerSection <= maxBytesPerSection)
+        {
+            if (_proTrainingCancelled)
+            {
+                Console.WriteLine("Pro 训练已取消。");
+                break;
+            }
+
+            int featureCount = ProHybridFileFeatures.GetFeatureCount(bytesPerSection);
+            Console.WriteLine($"\n--- Pro 候选：Raw 每段 {bytesPerSection} 字节，总特征 {featureCount} 维 ---");
+
+            var (candidateModel, auc, candidateDataView) = TrainProStep(fileData, bytesPerSection);
+            if (candidateModel != null && candidateDataView != null)
+            {
+                bool improved = bestModel == null || auc > bestAuc + _config.ProExpansionAucThreshold;
+                if (improved)
+                {
+                    bestModel = candidateModel;
+                    bestDataView = candidateDataView;
+                    bestAuc = auc;
+                    bestBytesPerSection = bytesPerSection;
+                    staleSteps = 0;
+                    Console.WriteLine($"  新最优 Pro 候选：{bytesPerSection} 字节/段，AUC {auc:P4}");
+                }
+                else
+                {
+                    staleSteps++;
+                    Console.WriteLine($"  未超过改进阈值，连续无显著提升：{staleSteps}/{_config.ProExpansionPatience}");
+                    if (staleSteps >= _config.ProExpansionPatience)
+                    {
+                        Console.WriteLine("  达到耐心步数，停止 Pro 动态扩展。");
+                        break;
+                    }
+                }
+            }
+
+            if (bytesPerSection > maxBytesPerSection / expansionFactor)
+                break;
+
+            bytesPerSection *= expansionFactor;
+        }
+
+        if (bestModel == null || bestDataView == null)
         {
             Console.WriteLine("警告：Pro 混合特征模型未产生有效模型。");
-            return (null!, ProHybridFileFeatures.RawBytesPerSection);
+            return (null!, bestBytesPerSection);
         }
 
         Console.WriteLine($"\n正在保存最优 Pro 模型...");
-        _mlContext.Model.Save(model, dataView.Schema, modelPath);
+        _mlContext.Model.Save(bestModel, bestDataView.Schema, modelPath);
         Console.WriteLine($"Pro ML.NET 模型已保存至: {modelPath}");
 
         if (!string.IsNullOrEmpty(onnxPath))
         {
             try
             {
-                ExportToOnnx(model, dataView, onnxPath);
+                ExportToOnnx(bestModel, bestDataView, onnxPath);
                 Console.WriteLine($"Pro ONNX 模型已保存至: {onnxPath}");
             }
             catch (Exception ex)
@@ -90,16 +140,16 @@ public class ModelTrainer
         }
 
         Console.WriteLine($"\n=== Pro 混合特征模型训练完成 ===");
-        Console.WriteLine($"Raw 每段字节数：{ProHybridFileFeatures.RawBytesPerSection}");
-        Console.WriteLine($"最终特征维度：{ProHybridFileFeatures.FeatureCount}");
-        Console.WriteLine($"AUC：{auc:P4}");
+        Console.WriteLine($"Raw 每段字节数：{bestBytesPerSection}");
+        Console.WriteLine($"最终特征维度：{ProHybridFileFeatures.GetFeatureCount(bestBytesPerSection)}");
+        Console.WriteLine($"AUC：{bestAuc:P4}");
 
-        return (model, ProHybridFileFeatures.RawBytesPerSection);
+        return (bestModel, bestBytesPerSection);
     }
 
     private (ITransformer model, double auc, IDataView dataView) TrainProStep(List<FileData> fileData, int bytesPerSection)
     {
-        int featureCount = ProHybridFileFeatures.FeatureCount;
+        int featureCount = ProHybridFileFeatures.GetFeatureCount(bytesPerSection);
 
         var validData = new List<FileData>();
         var validFeatures = new List<float[]>();
@@ -109,7 +159,7 @@ public class ModelTrainer
         {
             try
             {
-                var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fd.FilePath);
+                var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fd.FilePath, bytesPerSection);
                 var floatArray = proFeatures.ToFloatArray();
                 if (floatArray.Length != featureCount)
                 {
@@ -213,8 +263,8 @@ public class ModelTrainer
 
     public void PredictPro(ITransformer model, FileData fileData, int bytesPerSection)
     {
-        int featureCount = ProHybridFileFeatures.FeatureCount;
-        var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fileData.FilePath);
+        int featureCount = ProHybridFileFeatures.GetFeatureCount(bytesPerSection);
+        var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fileData.FilePath, bytesPerSection);
         var schemaDef = SchemaDefinition.Create(typeof(ProBinaryTrainingData));
         schemaDef["Features"].ColumnType = new VectorDataViewType(NumberDataViewType.Single, featureCount);
         var predictionEngine = _mlContext.Model.CreatePredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>(model, inputSchemaDefinition: schemaDef);

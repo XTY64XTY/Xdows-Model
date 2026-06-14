@@ -21,13 +21,13 @@ public class TrainingConfig
     public double ProExpansionAucThreshold { get; set; } = 0.0005;
     public int ProExpansionPatience { get; set; } = 3;
 
-    public double LearningRate { get; set; } = 0.05;
-    public int NumberOfLeaves { get; set; } = 31;
+    public double LearningRate { get; set; } = 0.005;
+    public int NumberOfLeaves { get; set; } = 63;
     public int MinimumExampleCountPerLeaf { get; set; } = 31;
-    public int NumberOfIterations { get; set; } = 800;
-    public double StandardL1Regularization { get; set; } = 0.005;
-    public double StandardL2Regularization { get; set; } = 0.05;
-    public int? RandomSeed { get; set; } = 42;
+    public int NumberOfIterations { get; set; } = 1024;
+    public double StandardL1Regularization { get; set; } = 0.01;
+    public double StandardL2Regularization { get; set; } = 0.1;
+    public int? RandomSeed { get; set; } = 43846;
 
     public double FlashLearningRate { get; set; } = 0.1;
     public int FlashNumberOfLeaves { get; set; } = 31;
