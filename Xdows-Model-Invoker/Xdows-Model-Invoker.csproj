@@ -17,7 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Xdows-Model-Config\Xdows-Model-Config.csproj" />
+    <ProjectReference Include="..\Xdows-Model-Config\Xdows-Model-Config.csproj" SetConfiguration="Configuration=$(Configuration)" />
   </ItemGroup>
 
   <ItemGroup>
