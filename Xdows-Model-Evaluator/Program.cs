@@ -162,7 +162,6 @@ internal static class Program
         Console.WriteLine($"TPR: {result.TruePositiveRate:P4}");
         Console.WriteLine($"FPR: {result.FalsePositiveRate:P4}");
         Console.WriteLine($"Raw score: {result.RawScore:F2}");
-        Console.WriteLine($"BrewTotal proxy score: {result.BrewTotalProxyScore:F2}");
         Console.WriteLine($"Avg scan time: {result.AverageScanTime.TotalMilliseconds:F3} ms");
     }
 
@@ -222,7 +221,6 @@ internal sealed record EvaluationResult(
     public double TruePositiveRate => TruePositive + FalseNegative > 0 ? (double)TruePositive / (TruePositive + FalseNegative) : 0;
     public double FalsePositiveRate => FalsePositive + TrueNegative > 0 ? (double)FalsePositive / (FalsePositive + TrueNegative) : 0;
     public double RawScore => TruePositive * 10 - FalseNegative * 7 - FalsePositive * 10;
-    public double BrewTotalProxyScore => RawScore * TruePositiveRate - Math.Abs(RawScore) * FalsePositiveRate * 1.27;
     public TimeSpan AverageScanTime => Total > 0 ? TimeSpan.FromTicks(Elapsed.Ticks / Total) : TimeSpan.Zero;
 
     public static EvaluationResult Create(

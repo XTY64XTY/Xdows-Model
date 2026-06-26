@@ -227,9 +227,9 @@ public class ModelTrainer
             var (bestThreshold, bestThresholdMetrics) = FindBestThreshold(rows);
             Console.WriteLine($"  阈值: {_config.ProThreshold:F2}%");
             Console.WriteLine($"  准确率: {thresholdMetrics.Accuracy:P4}，AUC: {auc:P4}，F1: {thresholdMetrics.F1Score:P4}");
-            Console.WriteLine($"  检出率: {thresholdMetrics.TruePositiveRate:P4}，误报率: {thresholdMetrics.FalsePositiveRate:P4}，BrewTotal 代理分数: {thresholdMetrics.BrewTotalProxyScore:F2}");
-            Console.WriteLine($"  最优代理阈值: {bestThreshold:F2}%");
-            Console.WriteLine($"  最优代理检出率: {bestThresholdMetrics.TruePositiveRate:P4}，误报率: {bestThresholdMetrics.FalsePositiveRate:P4}，BrewTotal 代理分数: {bestThresholdMetrics.BrewTotalProxyScore:F2}");
+            Console.WriteLine($"  检出率: {thresholdMetrics.TruePositiveRate:P4}，误报率: {thresholdMetrics.FalsePositiveRate:P4}");
+            Console.WriteLine($"  最优 F1 阈值: {bestThreshold:F2}%");
+            Console.WriteLine($"  最优 F1: {bestThresholdMetrics.F1Score:P4}，检出率: {bestThresholdMetrics.TruePositiveRate:P4}，误报率: {bestThresholdMetrics.FalsePositiveRate:P4}");
         }
         catch (ArgumentOutOfRangeException)
         {
@@ -444,7 +444,6 @@ public class ModelTrainer
         Console.WriteLine($"检出率 (TPR): {thresholdMetrics.TruePositiveRate:P4}");
         Console.WriteLine($"误报率 (FPR): {thresholdMetrics.FalsePositiveRate:P4}");
         Console.WriteLine($"F1 分数: {thresholdMetrics.F1Score:P4}");
-        Console.WriteLine($"BrewTotal 代理分数: {thresholdMetrics.BrewTotalProxyScore:F2}");
 
         Console.WriteLine("\n混淆矩阵:");
         Console.WriteLine($"TP: {thresholdMetrics.TruePositive}, FN: {thresholdMetrics.FalseNegative}");
@@ -478,9 +477,6 @@ public class ModelTrainer
         double falsePositiveRate = falsePositive + trueNegative > 0 ? (double)falsePositive / (falsePositive + trueNegative) : 0;
         double f1Score = precision + truePositiveRate > 0 ? 2 * precision * truePositiveRate / (precision + truePositiveRate) : 0;
 
-        double rawScore = truePositive * 10 - falseNegative * 7 - falsePositive * 10;
-        double brewTotalProxyScore = rawScore * truePositiveRate - Math.Abs(rawScore) * falsePositiveRate * 1.27;
-
         return new ThresholdMetrics(
             truePositive,
             falseNegative,
@@ -489,8 +485,7 @@ public class ModelTrainer
             accuracy,
             truePositiveRate,
             falsePositiveRate,
-            f1Score,
-            brewTotalProxyScore);
+            f1Score);
     }
 
     private static (double threshold, ThresholdMetrics metrics) FindBestThreshold(List<ThresholdEvaluationRow> rows)
@@ -501,7 +496,13 @@ public class ModelTrainer
         for (double threshold = 50; threshold <= 99.9; threshold += 0.1)
         {
             var metrics = ComputeThresholdMetrics(rows, threshold);
-            if (bestMetrics == null || metrics.BrewTotalProxyScore > bestMetrics.BrewTotalProxyScore)
+            if (bestMetrics == null ||
+                metrics.F1Score > bestMetrics.F1Score + 0.000001 ||
+                (Math.Abs(metrics.F1Score - bestMetrics.F1Score) <= 0.000001 &&
+                 metrics.FalsePositiveRate < bestMetrics.FalsePositiveRate) ||
+                (Math.Abs(metrics.F1Score - bestMetrics.F1Score) <= 0.000001 &&
+                 Math.Abs(metrics.FalsePositiveRate - bestMetrics.FalsePositiveRate) <= 0.000001 &&
+                 metrics.TruePositiveRate > bestMetrics.TruePositiveRate))
             {
                 bestThreshold = threshold;
                 bestMetrics = metrics;
@@ -568,8 +569,7 @@ public record ThresholdMetrics(
     double Accuracy,
     double TruePositiveRate,
     double FalsePositiveRate,
-    double F1Score,
-    double BrewTotalProxyScore);
+    double F1Score);
 
 public class FlashBinaryTrainingData
 {
