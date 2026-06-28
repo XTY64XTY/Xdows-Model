@@ -42,6 +42,7 @@ public class TrainingConfig
     public int ProNumberOfIterations { get; set; } = 1200;
     public double ProL1Regularization { get; set; } = 0.01;
     public double ProL2Regularization { get; set; } = 0.1;
+    public string ProLearner { get; set; } = "LightGbm";
 
     public void PrintStandardConfig()
     {
@@ -78,6 +79,7 @@ public class TrainingConfig
         Console.WriteLine($"Pro 渐进式扩展最大字节/段: {ProExpansionMaxBytesPerSection}");
         Console.WriteLine($"Pro 渐进式扩展 AUC 阈值: {ProExpansionAucThreshold}");
         Console.WriteLine($"Pro 渐进式扩展耐心步数: {ProExpansionPatience}");
+        Console.WriteLine($"Pro learner: {ProLearner}");
         Console.WriteLine($"学习率 (Learning Rate): {ProLearningRate}");
         Console.WriteLine($"叶子数 (Number of Leaves): {ProNumberOfLeaves}");
         Console.WriteLine($"最小叶节点样本数: {ProMinimumExampleCountPerLeaf}");

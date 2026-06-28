@@ -1112,7 +1112,7 @@ public static class ProHybridFeatureExtractor
         offset += source.Length;
     }
 
-    private static float[] ExtractStructuralFeatures(byte[] bytes)
+    internal static float[] ExtractStructuralFeatures(byte[] bytes)
     {
         var features = new float[ProHybridFileFeatures.StructuralFeatureCount];
         if (!TryReadPeLayout(bytes, out var layout))

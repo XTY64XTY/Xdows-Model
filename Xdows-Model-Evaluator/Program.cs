@@ -79,6 +79,7 @@ internal static class Program
         long falsePositive = 0;
         long trueNegative = 0;
         long failed = 0;
+        var scores = new List<EvaluationScore>();
 
         var stopwatch = Stopwatch.StartNew();
 
@@ -87,6 +88,8 @@ internal static class Program
             try
             {
                 var (isVirus, probability) = ModelInvoker.ScanFile(sample.Path);
+                scores.Add(new EvaluationScore(sample.IsMalicious, probability));
+
                 if (sample.IsMalicious && isVirus)
                     truePositive++;
                 else if (sample.IsMalicious)
@@ -115,7 +118,8 @@ internal static class Program
             falsePositive,
             trueNegative,
             failed,
-            stopwatch.Elapsed);
+            stopwatch.Elapsed,
+            scores);
     }
 
     private static void InitializeMode(string mode, EvaluationOptions options)
@@ -161,6 +165,11 @@ internal static class Program
         Console.WriteLine($"Accuracy: {result.Accuracy:P4}");
         Console.WriteLine($"TPR: {result.TruePositiveRate:P4}");
         Console.WriteLine($"FPR: {result.FalsePositiveRate:P4}");
+        Console.WriteLine($"F1: {result.F1Score:P4}");
+        if (result.Auc.HasValue)
+            Console.WriteLine($"AUC: {result.Auc.Value:P4}");
+        if (result.Auprc.HasValue)
+            Console.WriteLine($"AUPRC: {result.Auprc.Value:P4}");
         Console.WriteLine($"Raw score: {result.RawScore:F2}");
         Console.WriteLine($"Avg scan time: {result.AverageScanTime.TotalMilliseconds:F3} ms");
     }
@@ -207,6 +216,8 @@ internal static class Program
 
 internal sealed record EvaluationSample(string Path, bool IsMalicious);
 
+internal sealed record EvaluationScore(bool IsMalicious, float Probability);
+
 internal sealed record EvaluationResult(
     string Mode,
     long TruePositive,
@@ -214,12 +225,16 @@ internal sealed record EvaluationResult(
     long FalsePositive,
     long TrueNegative,
     long Failed,
-    TimeSpan Elapsed)
+    TimeSpan Elapsed,
+    double? Auc,
+    double? Auprc)
 {
     public long Total => TruePositive + FalseNegative + FalsePositive + TrueNegative;
     public double Accuracy => Total > 0 ? (double)(TruePositive + TrueNegative) / Total : 0;
+    public double Precision => TruePositive + FalsePositive > 0 ? (double)TruePositive / (TruePositive + FalsePositive) : 0;
     public double TruePositiveRate => TruePositive + FalseNegative > 0 ? (double)TruePositive / (TruePositive + FalseNegative) : 0;
     public double FalsePositiveRate => FalsePositive + TrueNegative > 0 ? (double)FalsePositive / (FalsePositive + TrueNegative) : 0;
+    public double F1Score => Precision + TruePositiveRate > 0 ? 2 * Precision * TruePositiveRate / (Precision + TruePositiveRate) : 0;
     public double RawScore => TruePositive * 10 - FalseNegative * 7 - FalsePositive * 10;
     public TimeSpan AverageScanTime => Total > 0 ? TimeSpan.FromTicks(Elapsed.Ticks / Total) : TimeSpan.Zero;
 
@@ -230,9 +245,81 @@ internal sealed record EvaluationResult(
         long falsePositive,
         long trueNegative,
         long failed,
-        TimeSpan elapsed)
+        TimeSpan elapsed,
+        IReadOnlyList<EvaluationScore> scores)
     {
-        return new EvaluationResult(mode, truePositive, falseNegative, falsePositive, trueNegative, failed, elapsed);
+        return new EvaluationResult(
+            mode,
+            truePositive,
+            falseNegative,
+            falsePositive,
+            trueNegative,
+            failed,
+            elapsed,
+            ComputeAuc(scores),
+            ComputeAuprc(scores));
+    }
+
+    private static double? ComputeAuc(IReadOnlyList<EvaluationScore> scores)
+    {
+        int positiveCount = scores.Count(s => s.IsMalicious);
+        int negativeCount = scores.Count - positiveCount;
+        if (positiveCount == 0 || negativeCount == 0)
+            return null;
+
+        var ordered = scores.OrderBy(s => s.Probability).ToList();
+        double positiveRankSum = 0;
+        int rank = 1;
+
+        for (int i = 0; i < ordered.Count;)
+        {
+            int j = i + 1;
+            while (j < ordered.Count && ordered[j].Probability.Equals(ordered[i].Probability))
+                j++;
+
+            double averageRank = (rank + rank + (j - i) - 1) / 2.0;
+            for (int k = i; k < j; k++)
+            {
+                if (ordered[k].IsMalicious)
+                    positiveRankSum += averageRank;
+            }
+
+            rank += j - i;
+            i = j;
+        }
+
+        return (positiveRankSum - positiveCount * (positiveCount + 1) / 2.0) / (positiveCount * negativeCount);
+    }
+
+    private static double? ComputeAuprc(IReadOnlyList<EvaluationScore> scores)
+    {
+        int positiveCount = scores.Count(s => s.IsMalicious);
+        if (positiveCount == 0)
+            return null;
+
+        var ordered = scores.OrderByDescending(s => s.Probability).ToList();
+        int truePositive = 0;
+        int falsePositive = 0;
+        double previousRecall = 0;
+        double area = 0;
+
+        foreach (var score in ordered)
+        {
+            if (score.IsMalicious)
+                truePositive++;
+            else
+                falsePositive++;
+
+            if (!score.IsMalicious)
+                continue;
+
+            double recall = (double)truePositive / positiveCount;
+            double precision = (double)truePositive / (truePositive + falsePositive);
+            area += (recall - previousRecall) * precision;
+            previousRecall = recall;
+        }
+
+        return area;
     }
 }
 

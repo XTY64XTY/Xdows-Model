@@ -225,6 +225,8 @@ internal class Program
             if (!ValidateData(data))
                 return;
 
+            TrainingDatasetReporter.Print(data);
+
             var trainer = new ModelTrainer(config);
             var testSamples = data.Take(Math.Min(5, data.Count)).ToList();
 

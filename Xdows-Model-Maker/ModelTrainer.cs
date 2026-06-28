@@ -8,12 +8,14 @@ public class ModelTrainer
 {
     private readonly MLContext _mlContext;
     private readonly TrainingConfig _config;
+    private readonly IProLearner _proLearner;
     private volatile bool _proTrainingCancelled;
 
     public ModelTrainer(TrainingConfig config)
     {
         _config = config;
         _mlContext = new MLContext(seed: config.RandomSeed);
+        _proLearner = ProLearnerFactory.Create(config.ProLearner);
         _proTrainingCancelled = false;
     }
 
@@ -73,6 +75,7 @@ public class ModelTrainer
         int bytesPerSection = _config.ProExpansionStartBytesPerSection;
         int expansionFactor = Math.Max(2, _config.ProExpansionFactor);
         int maxBytesPerSection = Math.Max(bytesPerSection, _config.ProExpansionMaxBytesPerSection);
+        var featureCache = ProFeatureCache.Build(fileData, maxBytesPerSection);
 
         while (bytesPerSection <= maxBytesPerSection)
         {
@@ -85,7 +88,7 @@ public class ModelTrainer
             int featureCount = ProHybridFileFeatures.GetFeatureCount(bytesPerSection);
             Console.WriteLine($"\n--- Pro 候选：Raw 每段 {bytesPerSection} 字节，总特征 {featureCount} 维 ---");
 
-            var (candidateModel, auc, candidateDataView) = TrainProStep(fileData, bytesPerSection);
+            var (candidateModel, auc, candidateDataView) = TrainProStep(featureCache, bytesPerSection);
             if (candidateModel != null && candidateDataView != null)
             {
                 bool improved = bestModel == null || auc > bestAuc + _config.ProExpansionAucThreshold;
@@ -147,27 +150,26 @@ public class ModelTrainer
         return (bestModel, bestBytesPerSection);
     }
 
-    private (ITransformer model, double auc, IDataView dataView) TrainProStep(List<FileData> fileData, int bytesPerSection)
+    private (ITransformer model, double auc, IDataView dataView) TrainProStep(ProFeatureCache featureCache, int bytesPerSection)
     {
         int featureCount = ProHybridFileFeatures.GetFeatureCount(bytesPerSection);
 
-        var validData = new List<FileData>();
+        var validData = new List<ProFeatureCacheEntry>();
         var validFeatures = new List<float[]>();
         int emptyFeaturesCount = 0;
 
-        foreach (var fd in fileData)
+        foreach (var entry in featureCache.Entries)
         {
             try
             {
-                var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fd.FilePath, bytesPerSection);
-                var floatArray = proFeatures.ToFloatArray();
+                var floatArray = entry.CreateFeatures(bytesPerSection);
                 if (floatArray.Length != featureCount)
                 {
                     emptyFeaturesCount++;
                 }
                 else
                 {
-                    validData.Add(fd);
+                    validData.Add(entry);
                     validFeatures.Add(floatArray);
                 }
             }
@@ -179,9 +181,12 @@ public class ModelTrainer
 
         if (emptyFeaturesCount > 0)
         {
-            Console.WriteLine($"  警告：{emptyFeaturesCount} 个文件特征提取失败");
+            Console.WriteLine($"  警告：{emptyFeaturesCount} 个缓存样本组装失败");
             Console.WriteLine($"  提示：可使用选项7「清洗非PE文件（含Pro兼容性检查）」功能清理不兼容的文件");
         }
+
+        if (featureCache.FailedCount > 0)
+            Console.WriteLine($"  Pro 缓存阶段已跳过 {featureCache.FailedCount} 个不兼容文件");
 
         if (validData.Count == 0)
         {
@@ -213,7 +218,8 @@ public class ModelTrainer
         var fullDataView = _mlContext.Data.LoadFromEnumerable(trainingData, schemaDef);
         var trainTestSplit = _mlContext.Data.TrainTestSplit(fullDataView, testFraction: 0.2);
 
-        var pipeline = BuildProPipeline(featureCount);
+        var pipeline = _proLearner.BuildPipeline(_mlContext, _config, featureCount);
+        Console.WriteLine($"  正在训练 Pro {_proLearner.Name} 模型...");
         var model = pipeline.Fit(trainTestSplit.TrainSet);
 
         double auc;
@@ -238,27 +244,6 @@ public class ModelTrainer
         }
 
         return (model, auc, fullDataView);
-    }
-
-    private IEstimator<ITransformer> BuildProPipeline(int featureCount)
-    {
-        var options = new Microsoft.ML.Trainers.LightGbm.LightGbmBinaryTrainer.Options
-        {
-            LabelColumnName = "Label",
-            FeatureColumnName = "Features",
-            LearningRate = _config.ProLearningRate,
-            NumberOfLeaves = _config.ProNumberOfLeaves,
-            MinimumExampleCountPerLeaf = _config.ProMinimumExampleCountPerLeaf,
-            NumberOfIterations = _config.ProNumberOfIterations,
-            Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
-            {
-                L1Regularization = _config.ProL1Regularization,
-                L2Regularization = _config.ProL2Regularization
-            }
-        };
-
-        return _mlContext.Transforms.NormalizeMinMax("Features", "Features")
-            .Append(_mlContext.BinaryClassification.Trainers.LightGbm(options));
     }
 
     public void PredictPro(ITransformer model, FileData fileData, int bytesPerSection)
