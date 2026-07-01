@@ -1,11 +1,20 @@
+using System.Runtime.InteropServices;
+using System.Text;
 using Xdows_Model_Config;
 
 namespace Xdows_Model_Caller;
 
 internal class Program
 {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleOutputCP(uint wCodePageID);
+
     private static void Main(string[] args)
     {
+        SetConsoleOutputCP(65001);
+        Console.OutputEncoding = Encoding.UTF8;
+
         Console.WriteLine("Xdows Model 调用器 By Shiyi");
         Console.WriteLine();
 
