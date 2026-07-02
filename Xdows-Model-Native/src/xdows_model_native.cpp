@@ -150,14 +150,33 @@ namespace
 
     bool IsPeFile(const std::vector<std::uint8_t>& bytes)
     {
-        if (bytes.size() < 64 || bytes[0] != 'M' || bytes[1] != 'Z')
+        if (bytes.size() < 64)
             return false;
 
-        std::int32_t peOffset = ReadInt32(bytes, 60);
-        if (peOffset < 0 || static_cast<size_t>(peOffset) + 4 > bytes.size())
+        // Search for 'MZ' magic in the first 256 bytes. Some malware variants
+        // prepend junk bytes before the DOS header, so checking only offset 0
+        // misses them.
+        size_t dosOffset = SIZE_MAX;
+        size_t scanLimit = std::min<size_t>(bytes.size(), 256);
+        for (size_t i = 0; i + 1 < scanLimit; ++i)
+        {
+            if (bytes[i] == 'M' && bytes[i + 1] == 'Z')
+            {
+                dosOffset = i;
+                break;
+            }
+        }
+        if (dosOffset == SIZE_MAX)
             return false;
 
-        return bytes[peOffset] == 'P' && bytes[peOffset + 1] == 'E';
+        if (dosOffset + 64 > bytes.size())
+            return false;
+
+        std::int32_t peOffset = ReadInt32(bytes, dosOffset + 60);
+        if (peOffset < 0 || static_cast<size_t>(dosOffset + peOffset) + 4 > bytes.size())
+            return false;
+
+        return bytes[dosOffset + peOffset] == 'P' && bytes[dosOffset + peOffset + 1] == 'E';
     }
 
     bool ContainsAscii(const std::vector<std::uint8_t>& bytes, const std::string& needle)
