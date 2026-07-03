@@ -47,8 +47,7 @@ internal sealed class LightGbmProLearner : IProLearner
             }
         };
 
-        return mlContext.Transforms.NormalizeMinMax("Features", "Features")
-            .Append(mlContext.BinaryClassification.Trainers.LightGbm(options));
+        return mlContext.BinaryClassification.Trainers.LightGbm(options);
     }
 }
 

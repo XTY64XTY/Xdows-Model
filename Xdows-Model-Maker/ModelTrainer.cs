@@ -44,96 +44,51 @@ public class ModelTrainer
         return TrainFlashModel(fileData, _config.FlashModelPath, _config.FlashOnnxPath);
     }
 
-    public (ITransformer model, int optimalBytesPerSection) TrainProModel(List<FileData> fileData, string modelPath, string? onnxPath = null)
+    public ITransformer? TrainProModel(List<FileData> fileData, string modelPath, string? onnxPath = null)
     {
-        return TrainProWithProgressiveExpansion(fileData, modelPath, onnxPath);
+        return TrainPro(fileData, modelPath, onnxPath);
     }
 
-    public (ITransformer model, int optimalBytesPerSection) TrainProModel(List<FileData> fileData)
+    public ITransformer? TrainProModel(List<FileData> fileData)
     {
         return TrainProModel(fileData, _config.ProModelPath, _config.ProOnnxPath);
     }
 
-    private (ITransformer model, int optimalBytesPerSection) TrainProWithProgressiveExpansion(List<FileData> fileData, string modelPath, string? onnxPath)
+    private ITransformer? TrainPro(List<FileData> fileData, string modelPath, string? onnxPath)
     {
         Console.WriteLine("\n开始训练 Pro 混合特征模型...");
-        Console.WriteLine($"固定特征组成：Standard {FileFeatures.FeatureCount} 维 + Flash {FlashFileFeatures.FeatureCount} 维 + PE结构 {ProHybridFileFeatures.StructuralFeatureCount} 维");
-        Console.WriteLine($"Raw 动态搜索：{_config.ProExpansionStartBytesPerSection} -> {_config.ProExpansionMaxBytesPerSection} 字节/段，扩展因子 {_config.ProExpansionFactor}\n");
+        Console.WriteLine($"固定特征组成：Standard {FileFeatures.FeatureCount} 维 + Flash {FlashFileFeatures.FeatureCount} 维 + RawStat {ProRawStatFeatures.TotalCount} 维 + PE结构 {ProHybridFileFeatures.StructuralFeatureCount} 维");
+        Console.WriteLine($"总特征维度：{ProHybridFileFeatures.FeatureCount}\n");
 
         if (_proTrainingCancelled)
         {
             Console.WriteLine("Pro 训练已取消。");
-            return (null!, _config.ProExpansionStartBytesPerSection);
+            return null;
         }
 
-        ITransformer? bestModel = null;
-        IDataView? bestDataView = null;
-        double bestAuc = double.NegativeInfinity;
-        int bestBytesPerSection = _config.ProExpansionStartBytesPerSection;
-        int staleSteps = 0;
-
-        int bytesPerSection = _config.ProExpansionStartBytesPerSection;
-        int expansionFactor = Math.Max(2, _config.ProExpansionFactor);
-        int maxBytesPerSection = Math.Max(bytesPerSection, _config.ProExpansionMaxBytesPerSection);
-        var featureCache = ProFeatureCache.Build(fileData, maxBytesPerSection);
-
-        while (bytesPerSection <= maxBytesPerSection)
+        var featureCache = ProFeatureCache.Build(fileData);
+        if (_proTrainingCancelled)
         {
-            if (_proTrainingCancelled)
-            {
-                Console.WriteLine("Pro 训练已取消。");
-                break;
-            }
-
-            int featureCount = ProHybridFileFeatures.GetFeatureCount(bytesPerSection);
-            Console.WriteLine($"\n--- Pro 候选：Raw 每段 {bytesPerSection} 字节，总特征 {featureCount} 维 ---");
-
-            var (candidateModel, auc, candidateDataView) = TrainProStep(featureCache, bytesPerSection);
-            if (candidateModel != null && candidateDataView != null)
-            {
-                bool improved = bestModel == null || auc > bestAuc + _config.ProExpansionAucThreshold;
-                if (improved)
-                {
-                    bestModel = candidateModel;
-                    bestDataView = candidateDataView;
-                    bestAuc = auc;
-                    bestBytesPerSection = bytesPerSection;
-                    staleSteps = 0;
-                    Console.WriteLine($"  新最优 Pro 候选：{bytesPerSection} 字节/段，AUC {auc:P4}");
-                }
-                else
-                {
-                    staleSteps++;
-                    Console.WriteLine($"  未超过改进阈值，连续无显著提升：{staleSteps}/{_config.ProExpansionPatience}");
-                    if (staleSteps >= _config.ProExpansionPatience)
-                    {
-                        Console.WriteLine("  达到耐心步数，停止 Pro 动态扩展。");
-                        break;
-                    }
-                }
-            }
-
-            if (bytesPerSection > maxBytesPerSection / expansionFactor)
-                break;
-
-            bytesPerSection *= expansionFactor;
+            Console.WriteLine("Pro 训练已取消。");
+            return null;
         }
 
-        if (bestModel == null || bestDataView == null)
+        var (model, evaluation, fullDataView) = TrainProStep(featureCache);
+        if (model == null || evaluation == null || fullDataView == null)
         {
             Console.WriteLine("警告：Pro 混合特征模型未产生有效模型。");
-            return (null!, bestBytesPerSection);
+            return null;
         }
 
-        Console.WriteLine($"\n正在保存最优 Pro 模型...");
-        _mlContext.Model.Save(bestModel, bestDataView.Schema, modelPath);
+        Console.WriteLine($"\n正在保存 Pro 模型...");
+        _mlContext.Model.Save(model, fullDataView.Schema, modelPath);
         Console.WriteLine($"Pro ML.NET 模型已保存至: {modelPath}");
 
         if (!string.IsNullOrEmpty(onnxPath))
         {
             try
             {
-                ExportToOnnx(bestModel, bestDataView, onnxPath);
+                ExportToOnnx(model, fullDataView, onnxPath);
                 Console.WriteLine($"Pro ONNX 模型已保存至: {onnxPath}");
             }
             catch (Exception ex)
@@ -142,17 +97,20 @@ public class ModelTrainer
             }
         }
 
-        Console.WriteLine($"\n=== Pro 混合特征模型训练完成 ===");
-        Console.WriteLine($"Raw 每段字节数：{bestBytesPerSection}");
-        Console.WriteLine($"最终特征维度：{ProHybridFileFeatures.GetFeatureCount(bestBytesPerSection)}");
-        Console.WriteLine($"AUC：{bestAuc:P4}");
+        WriteProEvaluationReport(modelPath, evaluation);
 
-        return (bestModel, bestBytesPerSection);
+        Console.WriteLine($"\n=== Pro 混合特征模型训练完成 ===");
+        Console.WriteLine($"最终特征维度：{ProHybridFileFeatures.FeatureCount}");
+        Console.WriteLine($"测试集 AUC：{evaluation.TestAuc:P4}");
+        Console.WriteLine($"训练集 AUC：{evaluation.TrainAuc:P4}");
+        Console.WriteLine($"AUC Gap：{evaluation.AucGap:P4}");
+
+        return model;
     }
 
-    private (ITransformer model, double auc, IDataView dataView) TrainProStep(ProFeatureCache featureCache, int bytesPerSection)
+    private (ITransformer? model, ProTrainingEvaluation? evaluation, IDataView? dataView) TrainProStep(ProFeatureCache featureCache)
     {
-        int featureCount = ProHybridFileFeatures.GetFeatureCount(bytesPerSection);
+        int featureCount = ProHybridFileFeatures.FeatureCount;
 
         var validData = new List<ProFeatureCacheEntry>();
         var validFeatures = new List<float[]>();
@@ -162,7 +120,7 @@ public class ModelTrainer
         {
             try
             {
-                var floatArray = entry.CreateFeatures(bytesPerSection);
+                var floatArray = entry.CreateFeatures();
                 if (floatArray.Length != featureCount)
                 {
                     emptyFeaturesCount++;
@@ -191,7 +149,7 @@ public class ModelTrainer
         if (validData.Count == 0)
         {
             Console.WriteLine("  错误：没有有效的训练数据！");
-            return (null!, 0, null!);
+            return (null, default, null);
         }
 
         Console.WriteLine($"  有效训练数据：{validData.Count} 个");
@@ -203,7 +161,7 @@ public class ModelTrainer
         if (blackCount == 0 || whiteCount == 0)
         {
             Console.WriteLine("  错误：有效数据中只有一类标签，无法训练！");
-            return (null!, 0, null!);
+            return (null, default, null);
         }
 
         var trainingData = validData.Select((fd, idx) => new ProBinaryTrainingData(featureCount)
@@ -222,34 +180,138 @@ public class ModelTrainer
         Console.WriteLine($"  正在训练 Pro {_proLearner.Name} 模型...");
         var model = pipeline.Fit(trainTestSplit.TrainSet);
 
-        double auc;
+        // 测试集评估
+        double testAuc, testAuprc;
+        ThresholdMetrics testThresholdMetrics, testBestThresholdMetrics;
+        double bestThreshold;
         try
         {
-            var predictions = model.Transform(trainTestSplit.TestSet);
-            var metrics = _mlContext.BinaryClassification.Evaluate(predictions);
-            auc = metrics.AreaUnderRocCurve;
-            var rows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(predictions, reuseRowObject: false).ToList();
-            var thresholdMetrics = ComputeThresholdMetrics(rows, _config.ProThreshold);
-            var (bestThreshold, bestThresholdMetrics) = FindBestThreshold(rows);
-            Console.WriteLine($"  阈值: {_config.ProThreshold:F2}%");
-            Console.WriteLine($"  准确率: {thresholdMetrics.Accuracy:P4}，AUC: {auc:P4}，F1: {thresholdMetrics.F1Score:P4}");
-            Console.WriteLine($"  检出率: {thresholdMetrics.TruePositiveRate:P4}，误报率: {thresholdMetrics.FalsePositiveRate:P4}");
-            Console.WriteLine($"  最优 F1 阈值: {bestThreshold:F2}%");
-            Console.WriteLine($"  最优 F1: {bestThresholdMetrics.F1Score:P4}，检出率: {bestThresholdMetrics.TruePositiveRate:P4}，误报率: {bestThresholdMetrics.FalsePositiveRate:P4}");
+            var testPredictions = model.Transform(trainTestSplit.TestSet);
+            var testMetrics = _mlContext.BinaryClassification.Evaluate(testPredictions);
+            testAuc = testMetrics.AreaUnderRocCurve;
+            testAuprc = testMetrics.AreaUnderPrecisionRecallCurve;
+            var testRows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(testPredictions, reuseRowObject: false).ToList();
+            testThresholdMetrics = ComputeThresholdMetrics(testRows, _config.ProThreshold);
+            (bestThreshold, testBestThresholdMetrics) = FindBestThreshold(testRows);
         }
         catch (ArgumentOutOfRangeException)
         {
-            auc = 0;
-            Console.WriteLine("  警告：AUC 无法计算（测试集类别不平衡），使用 AUC=0");
+            testAuc = double.NaN;
+            testAuprc = 0;
+            testThresholdMetrics = new ThresholdMetrics(0, 0, 0, 0, 0, 0, 0, 0);
+            testBestThresholdMetrics = testThresholdMetrics;
+            bestThreshold = _config.ProThreshold;
+            Console.WriteLine("  警告：测试集评估指标无法计算（类别不平衡）");
         }
 
-        return (model, auc, fullDataView);
+        // 训练集评估（用于 train-test gap）
+        double trainAuc;
+        try
+        {
+            var trainPredictions = model.Transform(trainTestSplit.TrainSet);
+            var trainMetrics = _mlContext.BinaryClassification.Evaluate(trainPredictions);
+            trainAuc = trainMetrics.AreaUnderRocCurve;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            trainAuc = double.NaN;
+        }
+
+        double aucGap = double.IsNaN(trainAuc) || double.IsNaN(testAuc) ? double.NaN : trainAuc - testAuc;
+
+        Console.WriteLine($"  阈值: {_config.ProThreshold:F2}%");
+        Console.WriteLine($"  === 测试集评估 ===");
+        Console.WriteLine($"  准确率: {testThresholdMetrics.Accuracy:P4}，AUC: {testAuc:P4}，AUPRC: {testAuprc:P4}，F1: {testThresholdMetrics.F1Score:P4}");
+        Console.WriteLine($"  检出率: {testThresholdMetrics.TruePositiveRate:P4}，误报率: {testThresholdMetrics.FalsePositiveRate:P4}");
+        Console.WriteLine($"  混淆矩阵: TP={testThresholdMetrics.TruePositive}, FN={testThresholdMetrics.FalseNegative}, FP={testThresholdMetrics.FalsePositive}, TN={testThresholdMetrics.TrueNegative}");
+        Console.WriteLine($"  最优 F1 阈值: {bestThreshold:F2}%");
+        Console.WriteLine($"  最优 F1: {testBestThresholdMetrics.F1Score:P4}，检出率: {testBestThresholdMetrics.TruePositiveRate:P4}，误报率: {testBestThresholdMetrics.FalsePositiveRate:P4}");
+        Console.WriteLine($"  === 训练集评估 ===");
+        Console.WriteLine($"  训练集 AUC: {trainAuc:P4}");
+        Console.WriteLine($"  === Train-Test Gap ===");
+        Console.WriteLine($"  AUC Gap: {aucGap:P4}{(double.IsNaN(aucGap) ? "  ⚠ 评估失败" : aucGap > 0.05 ? "  ⚠ 可能过拟合" : aucGap < -0.02 ? "  ⚠ 异常" : "")}");
+
+        var evaluation = new ProTrainingEvaluation(
+            testAuc, testAuprc, trainAuc, aucGap,
+            testThresholdMetrics, testBestThresholdMetrics, bestThreshold,
+            validData.Count, blackCount, whiteCount, featureCount);
+
+        return (model, evaluation, fullDataView);
     }
 
-    public void PredictPro(ITransformer model, FileData fileData, int bytesPerSection)
+    private void WriteProEvaluationReport(string modelPath, ProTrainingEvaluation evaluation)
     {
-        int featureCount = ProHybridFileFeatures.GetFeatureCount(bytesPerSection);
-        var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fileData.FilePath, bytesPerSection);
+        try
+        {
+            string reportPath = Path.ChangeExtension(modelPath, ".evaluation.json");
+            var report = new
+            {
+                GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                ModelType = "Pro",
+                FeatureCount = evaluation.FeatureCount,
+                Samples = new
+                {
+                    Total = evaluation.TotalSamples,
+                    Black = evaluation.BlackSamples,
+                    White = evaluation.WhiteSamples
+                },
+                TestMetrics = new
+                {
+                    Auc = evaluation.TestAuc,
+                    Auprc = evaluation.TestAuprc,
+                    Accuracy = evaluation.TestThresholdMetrics.Accuracy,
+                    TruePositiveRate = evaluation.TestThresholdMetrics.TruePositiveRate,
+                    FalsePositiveRate = evaluation.TestThresholdMetrics.FalsePositiveRate,
+                    F1Score = evaluation.TestThresholdMetrics.F1Score,
+                    ConfusionMatrix = new
+                    {
+                        TP = evaluation.TestThresholdMetrics.TruePositive,
+                        FN = evaluation.TestThresholdMetrics.FalseNegative,
+                        FP = evaluation.TestThresholdMetrics.FalsePositive,
+                        TN = evaluation.TestThresholdMetrics.TrueNegative
+                    }
+                },
+                TrainMetrics = new { Auc = evaluation.TrainAuc },
+                TrainTestGap = new
+                {
+                    AucGap = evaluation.AucGap,
+                    Warning = double.IsNaN(evaluation.AucGap) ? "Evaluation failed" : evaluation.AucGap > 0.05 ? "Possible overfitting" : evaluation.AucGap < -0.02 ? "Anomalous" : null
+                },
+                BestF1Threshold = new
+                {
+                    Threshold = evaluation.BestThreshold,
+                    F1Score = evaluation.TestBestThresholdMetrics.F1Score,
+                    TruePositiveRate = evaluation.TestBestThresholdMetrics.TruePositiveRate,
+                    FalsePositiveRate = evaluation.TestBestThresholdMetrics.FalsePositiveRate
+                },
+                Config = new
+                {
+                    ProThreshold = _config.ProThreshold,
+                    ProLearningRate = _config.ProLearningRate,
+                    ProNumberOfLeaves = _config.ProNumberOfLeaves,
+                    ProMinimumExampleCountPerLeaf = _config.ProMinimumExampleCountPerLeaf,
+                    ProNumberOfIterations = _config.ProNumberOfIterations,
+                    ProL1Regularization = _config.ProL1Regularization,
+                    ProL2Regularization = _config.ProL2Regularization,
+                    ProLearner = _config.ProLearner
+                }
+            };
+
+            var options = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+            string json = System.Text.Json.JsonSerializer.Serialize(report, options);
+            File.WriteAllText(reportPath, json);
+            Console.WriteLine($"  评估报告已保存至: {reportPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  评估报告保存失败：{ex.Message}");
+        }
+    }
+
+    public void PredictPro(ITransformer model, FileData fileData)
+    {
+        int featureCount = ProHybridFileFeatures.FeatureCount;
+        var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fileData.FilePath);
         var schemaDef = SchemaDefinition.Create(typeof(ProBinaryTrainingData));
         schemaDef["Features"].ColumnType = new VectorDataViewType(NumberDataViewType.Single, featureCount);
         var predictionEngine = _mlContext.Model.CreatePredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>(model, inputSchemaDefinition: schemaDef);
@@ -555,6 +617,19 @@ public record ThresholdMetrics(
     double TruePositiveRate,
     double FalsePositiveRate,
     double F1Score);
+
+public record ProTrainingEvaluation(
+    double TestAuc,
+    double TestAuprc,
+    double TrainAuc,
+    double AucGap,
+    ThresholdMetrics TestThresholdMetrics,
+    ThresholdMetrics TestBestThresholdMetrics,
+    double BestThreshold,
+    int TotalSamples,
+    int BlackSamples,
+    int WhiteSamples,
+    int FeatureCount);
 
 public class FlashBinaryTrainingData
 {

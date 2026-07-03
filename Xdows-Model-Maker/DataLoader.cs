@@ -152,8 +152,7 @@ public class DataLoader
 
     public static void CleanNonPEFiles(TrainingConfig config, bool proCheck = false)
     {
-        int proBytesPerSection = proCheck ? config.ProExpansionStartBytesPerSection : 512;
-        CleanNonPEFiles(config.BlackFolder, config.WhiteFolder, proCheck, proBytesPerSection);
+        CleanNonPEFiles(config.BlackFolder, config.WhiteFolder, proCheck, ProRawStatFeatures.SectionSize);
     }
 
     public static void CleanNonPEFiles(string blackFolder, string whiteFolder, bool proCheck = false, int proBytesPerSection = 512)

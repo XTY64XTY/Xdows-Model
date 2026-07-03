@@ -24,11 +24,13 @@ namespace
 {
     constexpr int kStandardFeatureCount = 299;
     constexpr int kFlashFeatureCount = 68;
-    constexpr int kDefaultProRawBytesPerSection = 512;
+    constexpr int kProRawStatFeaturesPerSection = 40;
+    constexpr int kProRawStatSectionCount = 3;
+    constexpr int kProRawStatFeatureCount = kProRawStatFeaturesPerSection * kProRawStatSectionCount;
+    constexpr int kProRawStatSectionSize = 512;
     constexpr int kProStructuralFeatureCount = 32;
     constexpr int kProFixedFeatureCount = kStandardFeatureCount + kFlashFeatureCount + kProStructuralFeatureCount;
-    constexpr int kProHybridFeatureCount =
-        kProFixedFeatureCount + 3 * kDefaultProRawBytesPerSection;
+    constexpr int kProHybridFeatureCount = kProFixedFeatureCount + kProRawStatFeatureCount;
     constexpr size_t kFlashRegionSize = 512ULL * 1024ULL;
     constexpr size_t kBlockEntropyRegionSize = 128ULL * 1024ULL;
 
@@ -772,40 +774,100 @@ namespace
             features.push_back(peValue);
     }
 
-    bool TryGetProRawBytesPerSection(int featureCount, size_t& bytesPerSection)
+    bool IsProFeatureCount(int featureCount)
     {
-        int rawFeatureCount = featureCount - kProFixedFeatureCount;
-        if (rawFeatureCount <= 0 || rawFeatureCount % 3 != 0)
-            return false;
-
-        bytesPerSection = static_cast<size_t>(rawFeatureCount / 3);
-        return true;
+        return featureCount == kProHybridFeatureCount;
     }
 
-    void AppendProRawFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features, size_t bytesPerSection)
+    void AppendProSectionStats(const std::vector<std::uint8_t>& bytes, size_t start, size_t length,
+                                size_t fileSize, std::vector<float>& features, size_t offset)
+    {
+        if (length == 0 || start >= bytes.size())
+            return;
+
+        size_t actualLength = std::min(length, bytes.size() - start);
+        if (actualLength == 0)
+            return;
+
+        std::array<long long, 256> counts{};
+        int printableCount = 0;
+        int letterCount = 0;
+        int digitCount = 0;
+        int highByteCount = 0;
+        int zeroCount = 0;
+        int maxZeroRun = 0;
+        int currentZeroRun = 0;
+
+        for (size_t i = 0; i < actualLength; i++)
+        {
+            std::uint8_t b = bytes[start + i];
+            counts[b]++;
+
+            if (b == 0)
+            {
+                zeroCount++;
+                currentZeroRun++;
+                if (currentZeroRun > maxZeroRun)
+                    maxZeroRun = currentZeroRun;
+            }
+            else
+            {
+                currentZeroRun = 0;
+            }
+
+            if (b >= 0x80)
+                highByteCount++;
+
+            if (b >= 32 && b <= 126)
+            {
+                printableCount++;
+                if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122))
+                    letterCount++;
+                else if (b >= 48 && b <= 57)
+                    digitCount++;
+            }
+        }
+
+        double entropy = ComputeEntropy(counts, actualLength);
+        features[offset + 0] = static_cast<float>(entropy);
+
+        for (int bin = 0; bin < 32; bin++)
+        {
+            long long sum = 0;
+            for (int j = 0; j < 8; j++)
+                sum += counts[bin * 8 + j];
+            features[offset + 1 + bin] = actualLength > 0
+                ? static_cast<float>(sum) / static_cast<float>(actualLength)
+                : 0.0f;
+        }
+
+        features[offset + 33] = actualLength > 0 ? static_cast<float>(printableCount) / static_cast<float>(actualLength) : 0.0f;
+        features[offset + 34] = actualLength > 0 ? static_cast<float>(zeroCount) / static_cast<float>(actualLength) : 0.0f;
+        features[offset + 35] = actualLength > 0 ? static_cast<float>(highByteCount) / static_cast<float>(actualLength) : 0.0f;
+        features[offset + 36] = actualLength > 0 ? static_cast<float>(letterCount) / static_cast<float>(actualLength) : 0.0f;
+        features[offset + 37] = actualLength > 0 ? static_cast<float>(digitCount) / static_cast<float>(actualLength) : 0.0f;
+        features[offset + 38] = actualLength > 0 ? static_cast<float>(maxZeroRun) / static_cast<float>(actualLength) : 0.0f;
+        features[offset + 39] = fileSize > 0 ? static_cast<float>(actualLength) / static_cast<float>(fileSize) : 0.0f;
+    }
+
+    void AppendProRawStatFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
     {
         size_t base = features.size();
-        features.resize(base + 3 * bytesPerSection, 0.0f);
-
-        auto copySection = [&](size_t sourceStart, size_t length, size_t targetOffset)
-        {
-            size_t maxLength = std::min(length, bytesPerSection);
-            for (size_t i = 0; i < maxLength && sourceStart + i < bytes.size(); i++)
-                features[base + targetOffset + i] = static_cast<float>(bytes[sourceStart + i]);
-        };
+        features.resize(base + kProRawStatFeatureCount, 0.0f);
 
         size_t fileSize = bytes.size();
-        size_t headLength = std::min(fileSize, bytesPerSection);
-        size_t midStart = fileSize / 2 > bytesPerSection / 2
-            ? fileSize / 2 - bytesPerSection / 2
-            : 0;
-        size_t midLength = std::min(midStart + bytesPerSection, fileSize) - midStart;
-        size_t tailStart = fileSize > bytesPerSection ? fileSize - bytesPerSection : 0;
-        size_t tailLength = fileSize - tailStart;
+        size_t sectionSize = kProRawStatSectionSize;
 
-        copySection(0, headLength, 0);
-        copySection(midStart, midLength, bytesPerSection);
-        copySection(tailStart, tailLength, bytesPerSection * 2);
+        size_t headLength = std::min(fileSize, sectionSize);
+        AppendProSectionStats(bytes, 0, headLength, fileSize, features, base);
+
+        size_t midStart = fileSize / 2 > sectionSize / 2 ? fileSize / 2 - sectionSize / 2 : 0;
+        size_t midLength = std::min(midStart + sectionSize, fileSize) - midStart;
+        AppendProSectionStats(bytes, midStart, midLength, fileSize, features, base + kProRawStatFeaturesPerSection);
+
+        size_t tailStart = fileSize > sectionSize ? fileSize - sectionSize : 0;
+        size_t tailLength = fileSize - tailStart;
+        AppendProSectionStats(bytes, tailStart, tailLength, fileSize, features, base + kProRawStatFeaturesPerSection * 2);
     }
 
     void AppendProStructuralFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
@@ -972,15 +1034,14 @@ namespace
             return features.size() == kFlashFeatureCount;
         case XdowsModelNativeModePro:
         {
-            size_t bytesPerSection = 0;
-            if (!TryGetProRawBytesPerSection(featureCount, bytesPerSection))
+            if (featureCount != kProHybridFeatureCount)
                 return false;
 
             AppendStandardFeatures(bytes, features);
             AppendFlashFeatures(bytes, features);
-            AppendProRawFeatures(bytes, features, bytesPerSection);
+            AppendProRawStatFeatures(bytes, features);
             AppendProStructuralFeatures(bytes, features);
-            return features.size() == static_cast<size_t>(featureCount);
+            return features.size() == static_cast<size_t>(kProHybridFeatureCount);
         }
         default:
             AppendStandardFeatures(bytes, features);

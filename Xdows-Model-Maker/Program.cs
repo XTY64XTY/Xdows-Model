@@ -275,7 +275,7 @@ internal class Program
                 Console.WriteLine("=============================================");
                 config.PrintProConfig();
 
-                var (proModel, optimalBytesPerSection) = trainer.TrainProModel(data);
+                var proModel = trainer.TrainProModel(data);
 
                 if (proModel == null)
                 {
@@ -285,15 +285,14 @@ internal class Program
                 {
                     Console.WriteLine("\n对部分样本进行 Pro 预测测试:");
                     foreach (var sample in testSamples)
-                        trainer.PredictPro(proModel, sample, optimalBytesPerSection);
+                        trainer.PredictPro(proModel, sample);
                 }
 
                 Console.WriteLine("\n=============================================");
                 Console.WriteLine("  Pro 模型训练完成！");
                 Console.WriteLine($"  Pro ML.NET 模型已保存至: {config.ProModelPath}");
                 Console.WriteLine($"  Pro ONNX 模型已保存至: {config.ProOnnxPath}");
-                Console.WriteLine($"  Raw 每段字节数: {optimalBytesPerSection}");
-                Console.WriteLine($"  最优特征维度: {ProHybridFileFeatures.GetFeatureCount(optimalBytesPerSection)}");
+                Console.WriteLine($"  特征维度: {ProHybridFileFeatures.FeatureCount}");
                 Console.WriteLine("=============================================");
             }
 

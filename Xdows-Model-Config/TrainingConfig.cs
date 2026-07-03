@@ -15,12 +15,6 @@ public class TrainingConfig
     public double FlashThreshold { get; set; } = 96.0;
     public double ProThreshold { get; set; } = 94.0;
 
-    public int ProExpansionStartBytesPerSection { get; set; } = 512;
-    public int ProExpansionFactor { get; set; } = 2;
-    public int ProExpansionMaxBytesPerSection { get; set; } = 4096;
-    public double ProExpansionAucThreshold { get; set; } = 0.0005;
-    public int ProExpansionPatience { get; set; } = 3;
-
     public double LearningRate { get; set; } = 0.005;
     public int NumberOfLeaves { get; set; } = 63;
     public int MinimumExampleCountPerLeaf { get; set; } = 31;
@@ -74,11 +68,6 @@ public class TrainingConfig
     public void PrintProConfig()
     {
         Console.WriteLine("\n=== Pro 模型配置 ===");
-        Console.WriteLine($"Pro 渐进式扩展起始字节/段: {ProExpansionStartBytesPerSection}");
-        Console.WriteLine($"Pro 渐进式扩展因子: {ProExpansionFactor}");
-        Console.WriteLine($"Pro 渐进式扩展最大字节/段: {ProExpansionMaxBytesPerSection}");
-        Console.WriteLine($"Pro 渐进式扩展 AUC 阈值: {ProExpansionAucThreshold}");
-        Console.WriteLine($"Pro 渐进式扩展耐心步数: {ProExpansionPatience}");
         Console.WriteLine($"Pro learner: {ProLearner}");
         Console.WriteLine($"学习率 (Learning Rate): {ProLearningRate}");
         Console.WriteLine($"叶子数 (Number of Leaves): {ProNumberOfLeaves}");
@@ -87,6 +76,8 @@ public class TrainingConfig
         Console.WriteLine($"L1 正则化: {ProL1Regularization}");
         Console.WriteLine($"L2 正则化: {ProL2Regularization}");
         Console.WriteLine($"判毒阈值: {ProThreshold}%");
+        Console.WriteLine($"Raw 统计特征: 3 段 × 40 维 = 120 维 (固定)");
+        Console.WriteLine($"总特征维度: 519 (299 + 68 + 120 + 32)");
         Console.WriteLine("========================\n");
     }
 }

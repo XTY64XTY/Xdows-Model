@@ -1013,66 +1013,143 @@ public class FileFeatures
     }
 }
 
-public class ProFileFeatures
+public class ProRawStatFeatures
 {
+    public const int FeaturesPerSection = 40;
     public const int SectionCount = 3;
+    public const int TotalCount = FeaturesPerSection * SectionCount;
+    public const int SectionSize = 512;
 
-    public int BytesPerSection { get; }
-    public int FeatureCount => SectionCount * BytesPerSection;
-    public float[] RawBytes { get; }
-
-    public ProFileFeatures(int bytesPerSection)
-    {
-        BytesPerSection = bytesPerSection;
-        RawBytes = new float[FeatureCount];
-    }
+    public float[] Features { get; } = new float[TotalCount];
 
     public float[] ToFloatArray()
     {
-        var result = new float[FeatureCount];
-        Array.Copy(RawBytes, result, FeatureCount);
+        var result = new float[TotalCount];
+        Array.Copy(Features, result, TotalCount);
         return result;
+    }
+}
+
+public static class ProRawStatExtractor
+{
+    public static ProRawStatFeatures ExtractFromBytes(byte[] bytes)
+    {
+        var result = new ProRawStatFeatures();
+        int fileSize = bytes.Length;
+        int sectionSize = ProRawStatFeatures.SectionSize;
+
+        int headLength = Math.Min(sectionSize, fileSize);
+        ExtractSectionStats(bytes, 0, headLength, fileSize, result.Features, 0);
+
+        int midStart = Math.Max(0, fileSize / 2 - sectionSize / 2);
+        int midLength = Math.Min(sectionSize, fileSize - midStart);
+        ExtractSectionStats(bytes, midStart, midLength, fileSize, result.Features, ProRawStatFeatures.FeaturesPerSection);
+
+        int tailStart = Math.Max(0, fileSize - sectionSize);
+        int tailLength = fileSize - tailStart;
+        ExtractSectionStats(bytes, tailStart, tailLength, fileSize, result.Features, ProRawStatFeatures.FeaturesPerSection * 2);
+
+        return result;
+    }
+
+    private static void ExtractSectionStats(byte[] bytes, int start, int length, int fileSize, float[] destination, int offset)
+    {
+        if (length <= 0 || start >= bytes.Length)
+            return;
+
+        int actualLength = Math.Min(length, bytes.Length - start);
+        if (actualLength <= 0)
+            return;
+
+        Span<long> byteCounts = stackalloc long[256];
+        byteCounts.Clear();
+
+        int printableCount = 0;
+        int letterCount = 0;
+        int digitCount = 0;
+        int highByteCount = 0;
+        int zeroCount = 0;
+        int maxZeroRun = 0;
+        int currentZeroRun = 0;
+
+        for (int i = 0; i < actualLength; i++)
+        {
+            byte b = bytes[start + i];
+            byteCounts[b]++;
+
+            if (b == 0)
+            {
+                zeroCount++;
+                currentZeroRun++;
+                if (currentZeroRun > maxZeroRun)
+                    maxZeroRun = currentZeroRun;
+            }
+            else
+            {
+                currentZeroRun = 0;
+            }
+
+            if (b >= 0x80)
+                highByteCount++;
+
+            if (b >= 32 && b <= 126)
+            {
+                printableCount++;
+                if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122))
+                    letterCount++;
+                else if (b >= 48 && b <= 57)
+                    digitCount++;
+            }
+        }
+
+        double entropy = 0;
+        for (int i = 0; i < 256; i++)
+        {
+            if (byteCounts[i] > 0)
+            {
+                double p = (double)byteCounts[i] / actualLength;
+                entropy -= p * Math.Log(p, 2);
+            }
+        }
+        destination[offset + 0] = (float)entropy;
+
+        for (int bin = 0; bin < 32; bin++)
+        {
+            long sum = 0;
+            for (int j = 0; j < 8; j++)
+                sum += byteCounts[bin * 8 + j];
+            destination[offset + 1 + bin] = actualLength > 0 ? (float)sum / actualLength : 0f;
+        }
+
+        destination[offset + 33] = actualLength > 0 ? (float)printableCount / actualLength : 0f;
+        destination[offset + 34] = actualLength > 0 ? (float)zeroCount / actualLength : 0f;
+        destination[offset + 35] = actualLength > 0 ? (float)highByteCount / actualLength : 0f;
+        destination[offset + 36] = actualLength > 0 ? (float)letterCount / actualLength : 0f;
+        destination[offset + 37] = actualLength > 0 ? (float)digitCount / actualLength : 0f;
+        destination[offset + 38] = actualLength > 0 ? (float)maxZeroRun / actualLength : 0f;
+        destination[offset + 39] = fileSize > 0 ? (float)actualLength / fileSize : 0f;
     }
 }
 
 public class ProHybridFileFeatures
 {
-    public const int DefaultRawBytesPerSection = 512;
     public const int StructuralFeatureCount = 32;
+    public const int RawStatFeatureCount = ProRawStatFeatures.TotalCount;
     public const int FixedFeatureCount = FileFeatures.FeatureCount + FlashFileFeatures.FeatureCount + StructuralFeatureCount;
-    public static int RawBytesPerSection => DefaultRawBytesPerSection;
-    public static int RawFeatureCount => GetRawFeatureCount(DefaultRawBytesPerSection);
-    public static int FeatureCount => GetFeatureCount(DefaultRawBytesPerSection);
+    public static int FeatureCount => FixedFeatureCount + RawStatFeatureCount;
 
-    public int BytesPerSection { get; }
     public int FeatureLength { get; }
     public float[] Features { get; }
 
-    public ProHybridFileFeatures(int bytesPerSection = DefaultRawBytesPerSection)
+    public ProHybridFileFeatures()
     {
-        if (bytesPerSection <= 0)
-            throw new ArgumentOutOfRangeException(nameof(bytesPerSection), "Raw bytes per section must be positive.");
-
-        BytesPerSection = bytesPerSection;
-        FeatureLength = GetFeatureCount(bytesPerSection);
+        FeatureLength = FeatureCount;
         Features = new float[FeatureLength];
     }
 
-    public static int GetRawFeatureCount(int bytesPerSection) => ProFileFeatures.SectionCount * bytesPerSection;
-
-    public static int GetFeatureCount(int bytesPerSection) => FixedFeatureCount + GetRawFeatureCount(bytesPerSection);
-
-    public static bool TryGetRawBytesPerSection(int featureCount, out int bytesPerSection)
+    public static bool IsProFeatureCount(int featureCount)
     {
-        int rawFeatureCount = featureCount - FixedFeatureCount;
-        if (rawFeatureCount > 0 && rawFeatureCount % ProFileFeatures.SectionCount == 0)
-        {
-            bytesPerSection = rawFeatureCount / ProFileFeatures.SectionCount;
-            return true;
-        }
-
-        bytesPerSection = 0;
-        return false;
+        return featureCount == FeatureCount;
     }
 
     public float[] ToFloatArray()
@@ -1085,13 +1162,13 @@ public class ProHybridFileFeatures
 
 public static class ProHybridFeatureExtractor
 {
-    public static ProHybridFileFeatures ExtractFeatures(string filePath, int bytesPerSection = ProHybridFileFeatures.DefaultRawBytesPerSection)
+    public static ProHybridFileFeatures ExtractFeatures(string filePath)
     {
         var bytes = File.ReadAllBytes(filePath);
-        return ExtractFromBytes(bytes, bytesPerSection);
+        return ExtractFromBytes(bytes);
     }
 
-    public static ProHybridFileFeatures ExtractFromBytes(byte[] bytes, int bytesPerSection = ProHybridFileFeatures.DefaultRawBytesPerSection)
+    public static ProHybridFileFeatures ExtractFromBytes(byte[] bytes)
     {
         if (bytes.Length == 0)
             throw new NotSupportedException("文件为空");
@@ -1099,12 +1176,12 @@ public static class ProHybridFeatureExtractor
         if (bytes.Length < 64 || !ByteAnalysisHelper.IsPeFile(bytes))
             throw new NotSupportedException("不支持该文件类型");
 
-        var result = new ProHybridFileFeatures(bytesPerSection);
+        var result = new ProHybridFileFeatures();
         int idx = 0;
 
         CopyInto(FeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
         CopyInto(FlashFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
-        CopyInto(ProFeatureExtractor.ExtractFromBytes(bytes, bytesPerSection).ToFloatArray(), result.Features, ref idx);
+        CopyInto(ProRawStatExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
         CopyInto(ExtractStructuralFeatures(bytes), result.Features, ref idx);
 
         return result;
@@ -1326,106 +1403,4 @@ public static class ProHybridFeatureExtractor
         uint SizeOfUninitializedData,
         ushort Subsystem,
         ushort DllCharacteristics);
-}
-
-public class ProFeatureExtractor
-{
-    private const int PeCheckSize = 512;
-
-    public static ProFileFeatures ExtractFeatures(string filePath, int bytesPerSection)
-    {
-        var fileInfo = new FileInfo(filePath);
-        long fileSize = fileInfo.Length;
-
-        if (fileSize == 0)
-            throw new NotSupportedException("文件为空");
-
-        if (fileSize < 64)
-            throw new NotSupportedException("文件过小，无法进行PE格式验证");
-
-        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
-
-        int checkSize = (int)Math.Min(PeCheckSize, fileSize);
-        byte[] checkBuf = new byte[checkSize];
-        int checkRead = 0;
-        while (checkRead < checkSize)
-        {
-            int n = fs.Read(checkBuf, checkRead, checkSize - checkRead);
-            if (n == 0) break;
-            checkRead += n;
-        }
-        if (!ByteAnalysisHelper.IsPeFile(checkBuf))
-            throw new NotSupportedException("不支持该文件类型");
-
-        var features = new ProFileFeatures(bytesPerSection);
-        int sectionSize = bytesPerSection;
-
-        ReadSection(fs, 0, (int)Math.Min(sectionSize, fileSize), features.RawBytes, 0);
-        long midStart = Math.Max(0, fileSize / 2 - sectionSize / 2);
-        int midLen = (int)(Math.Min(midStart + sectionSize, fileSize) - midStart);
-        ReadSection(fs, midStart, midLen, features.RawBytes, sectionSize);
-        long tailStart = Math.Max(0, fileSize - sectionSize);
-        int tailLen = (int)(fileSize - tailStart);
-        ReadSection(fs, tailStart, tailLen, features.RawBytes, sectionSize * 2);
-
-        return features;
-    }
-
-    private static void ReadSection(FileStream fs, long start, int length, float[] buffer, int bufferOffset)
-    {
-        if (length <= 0) return;
-        fs.Position = start;
-        byte[] temp = new byte[length];
-        int totalRead = 0;
-        while (totalRead < length)
-        {
-            int n = fs.Read(temp, totalRead, length - totalRead);
-            if (n == 0) break;
-            totalRead += n;
-        }
-        for (int i = 0; i < totalRead; i++)
-            buffer[bufferOffset + i] = temp[i];
-    }
-
-    public static ProFileFeatures ExtractFromBytes(byte[] bytes, int bytesPerSection)
-    {
-        if (bytes.Length == 0)
-            throw new NotSupportedException("文件为空");
-
-        if (bytes.Length < 64)
-            throw new NotSupportedException("文件过小，无法进行PE格式验证");
-
-        var features = new ProFileFeatures(bytesPerSection);
-
-        int sectionSize = bytesPerSection;
-        int totalFeatures = ProFileFeatures.SectionCount * sectionSize;
-
-        long fileSize = bytes.Length;
-
-        int headStart = 0;
-        int headEnd = Math.Min(sectionSize, (int)fileSize);
-
-        int midStart = Math.Max(0, (int)(fileSize / 2) - sectionSize / 2);
-        int midEnd = Math.Min(midStart + sectionSize, (int)fileSize);
-
-        int tailStart = Math.Max(0, (int)fileSize - sectionSize);
-        int tailEnd = (int)fileSize;
-
-        int offset = 0;
-
-        for (int i = headStart; i < headEnd && offset < totalFeatures; i++)
-            features.RawBytes[offset++] = bytes[i];
-        offset = sectionSize;
-
-        for (int i = midStart; i < midEnd && offset < sectionSize * 2; i++)
-            features.RawBytes[offset++] = bytes[i];
-        offset = sectionSize * 2;
-
-        for (int i = tailStart; i < tailEnd && offset < totalFeatures; i++)
-            features.RawBytes[offset++] = bytes[i];
-
-        return features;
-    }
-
-    public static bool IsPeFile(byte[] bytes) => ByteAnalysisHelper.IsPeFile(bytes);
 }
