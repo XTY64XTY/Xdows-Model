@@ -6,9 +6,49 @@ namespace Xdows_Model_Caller;
 
 internal class Program
 {
+    private enum XdowsModelNativeMode
+    {
+        Standard = 0,
+        Flash = 1,
+        Pro = 2
+    }
+
+    private enum XdowsModelNativeStatus
+    {
+        Ok = 0,
+        InvalidArgument = 1,
+        FileNotFound = 2,
+        UnsupportedFile = 3,
+        ModelNotFound = 4,
+        InternalError = 5
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct XdowsModelNativeScanResult
+    {
+        public int Size;
+        public int Status;
+        public int IsThreat;
+        public float Probability;
+        public IntPtr DetectionName;
+        public IntPtr ErrorMessage;
+    }
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetConsoleOutputCP(uint wCodePageID);
+
+    [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    private static extern int XdowsModelNativeInitialize(string modelDirectory, int mode, out IntPtr session);
+
+    [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    private static extern int XdowsModelNativeScanFile(IntPtr session, string filePath, out XdowsModelNativeScanResult result);
+
+    [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall)]
+    private static extern void XdowsModelNativeShutdown(IntPtr session);
+
+    [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall)]
+    private static extern void XdowsModelNativeFreeString(IntPtr value);
 
     private static void Main(string[] args)
     {
@@ -22,6 +62,7 @@ internal class Program
         bool flashMode = false;
         bool proMode = false;
         string filePath = string.Empty;
+        string? modelPath = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -41,6 +82,10 @@ internal class Program
             {
                 filePath = args[i];
             }
+            else if (string.IsNullOrEmpty(modelPath))
+            {
+                modelPath = args[i];
+            }
         }
 
         int modeCount = (standardMode ? 1 : 0) + (flashMode ? 1 : 0) + (proMode ? 1 : 0);
@@ -52,7 +97,7 @@ internal class Program
 
         if (string.IsNullOrEmpty(filePath))
         {
-            Console.WriteLine("用法: Xdows-Model-Caller.exe <文件路径> [-s] [-f] [-p]");
+            Console.WriteLine("用法: Xdows-Model-Caller.exe <文件路径> [模型路径] [-s] [-f] [-p]");
             Console.WriteLine();
             Console.WriteLine("选项:");
             Console.WriteLine("  -s    使用 Standard 模型");
@@ -64,44 +109,154 @@ internal class Program
             return;
         }
 
+        if (!File.Exists(filePath))
+        {
+            Console.WriteLine($"错误：文件不存在：{filePath}");
+            return;
+        }
+
         string modelName = proMode ? "Pro" : (flashMode ? "Flash" : "Standard");
         Console.WriteLine($"开始扫描：{filePath}");
         Console.WriteLine($"扫描模型：{modelName}");
         Console.WriteLine();
 
+        string? nativeDllPath = FindNativeDll();
+        if (nativeDllPath != null && TryRunNative(nativeDllPath, filePath, modelPath, proMode, flashMode, out bool isVirus, out float probability))
+        {
+            PrintResult(isVirus, probability);
+            return;
+        }
+
+        RunManaged(filePath, modelPath, proMode, flashMode);
+    }
+
+    private static string? FindNativeDll()
+    {
+        string baseDir = AppContext.BaseDirectory;
+        string candidate = Path.Combine(baseDir, "Xdows-Model-Native.dll");
+        if (File.Exists(candidate))
+            return candidate;
+
+        string projectDir = Path.Combine(baseDir, "..", "..", "..", "..");
+        candidate = Path.GetFullPath(Path.Combine(projectDir, "Xdows-Model-Native", "x64", "Release", "Xdows-Model-Native.dll"));
+        if (File.Exists(candidate))
+            return candidate;
+
+        return null;
+    }
+
+    private static bool TryRunNative(string nativeDllPath, string filePath, string? modelPath, bool proMode, bool flashMode, out bool isVirus, out float probability)
+    {
+        isVirus = false;
+        probability = 0f;
+
+        string modelDirectory = !string.IsNullOrEmpty(modelPath)
+            ? Path.GetDirectoryName(modelPath) ?? AppContext.BaseDirectory
+            : AppContext.BaseDirectory;
+
+        if (!Directory.Exists(modelDirectory))
+            return false;
+
+        var mode = proMode ? XdowsModelNativeMode.Pro : (flashMode ? XdowsModelNativeMode.Flash : XdowsModelNativeMode.Standard);
+
+        try
+        {
+            int initStatus = XdowsModelNativeInitialize(modelDirectory, (int)mode, out IntPtr session);
+            if (initStatus != (int)XdowsModelNativeStatus.Ok || session == IntPtr.Zero)
+                return false;
+
+            try
+            {
+                int scanStatus = XdowsModelNativeScanFile(session, filePath, out XdowsModelNativeScanResult result);
+                if (scanStatus == (int)XdowsModelNativeStatus.Ok)
+                {
+                    isVirus = result.IsThreat != 0;
+                    probability = result.Probability * 100f;
+
+                    if (result.DetectionName != IntPtr.Zero)
+                        XdowsModelNativeFreeString(result.DetectionName);
+                    if (result.ErrorMessage != IntPtr.Zero)
+                        XdowsModelNativeFreeString(result.ErrorMessage);
+
+                    return true;
+                }
+
+                if (result.ErrorMessage != IntPtr.Zero)
+                    XdowsModelNativeFreeString(result.ErrorMessage);
+                if (result.DetectionName != IntPtr.Zero)
+                    XdowsModelNativeFreeString(result.DetectionName);
+
+                return false;
+            }
+            finally
+            {
+                XdowsModelNativeShutdown(session);
+            }
+        }
+        catch (DllNotFoundException)
+        {
+            return false;
+        }
+        catch (BadImageFormatException)
+        {
+            return false;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private static void RunManaged(string filePath, string? modelPath, bool proMode, bool flashMode)
+    {
         try
         {
             if (proMode)
             {
-                Xdows_Model_Invoker.ModelInvoker.InitializePro();
+                if (!string.IsNullOrEmpty(modelPath))
+                    Xdows_Model_Invoker.ModelInvoker.InitializePro(modelPath);
+                else
+                    Xdows_Model_Invoker.ModelInvoker.InitializePro();
             }
             else if (flashMode)
             {
-                Xdows_Model_Invoker.ModelInvoker.InitializeFlash();
+                if (!string.IsNullOrEmpty(modelPath))
+                    Xdows_Model_Invoker.ModelInvoker.InitializeFlash(modelPath);
+                else
+                    Xdows_Model_Invoker.ModelInvoker.InitializeFlash();
             }
             else
             {
-                Xdows_Model_Invoker.ModelInvoker.Initialize();
+                if (!string.IsNullOrEmpty(modelPath))
+                    Xdows_Model_Invoker.ModelInvoker.Initialize(modelPath);
+                else
+                    Xdows_Model_Invoker.ModelInvoker.Initialize();
             }
 
-            var currentMode = Xdows_Model_Invoker.ModelInvoker.CurrentMode;
             Xdows_Model_Invoker.ModelInvoker.ConfigureThresholds(new TrainingConfig());
 
             var (isVirus, probability) = Xdows_Model_Invoker.ModelInvoker.ScanFile(filePath);
-
-            if (!isVirus)
-            {
-                Console.WriteLine($"Safe({probability:F2}%)");
-            }
-            else
-            {
-                Console.WriteLine($"Virus({probability:F2}%)");
-            }
+            PrintResult(isVirus, probability);
         }
         catch (Exception ex)
         {
             Console.WriteLine("错误：" + ex.Message);
         }
+        finally
+        {
+            Xdows_Model_Invoker.ModelInvoker.UnloadModel();
+        }
     }
 
+    private static void PrintResult(bool isVirus, float probability)
+    {
+        if (!isVirus)
+        {
+            Console.WriteLine($"Safe({probability:F2}%)");
+        }
+        else
+        {
+            Console.WriteLine($"Virus({probability:F2}%)");
+        }
+    }
 }
