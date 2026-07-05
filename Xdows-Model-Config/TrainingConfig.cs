@@ -1,9 +1,19 @@
 namespace Xdows_Model_Config;
 
+public static class FeatureSchema
+{
+    public const int Version = 1;
+    public const int StandardFeatureCount = 299;
+    public const int FlashFeatureCount = 68;
+    public const int ProHybridFeatureCount = 519;
+    public const int ProRawStatCount = 120;
+    public const int ProStructuralCount = 32;
+}
+
 public class TrainingConfig
 {
-    public string BlackFolder { get; set; } = @"D:\Code\Model\Files\Black";
-    public string WhiteFolder { get; set; } = @"D:\Code\Model\Files\White";
+    public string BlackFolder { get; set; } = string.Empty;
+    public string WhiteFolder { get; set; } = string.Empty;
     public string ModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model.zip");
     public string OnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model.onnx");
     public string FlashModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Flash.zip");
