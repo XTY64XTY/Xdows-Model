@@ -822,14 +822,15 @@ public class FlashFeatureExtractor
         if (bytes.Length < 64 || !ByteAnalysisHelper.IsPeFile(bytes))
             throw new NotSupportedException("不支持该文件类型");
 
-        int headLen = Math.Min(bytes.Length, FlashRegionSize);
-        var headBuf = new byte[headLen];
-        Array.Copy(bytes, headBuf, headLen);
+        if (bytes.Length <= FlashRegionSize)
+            return ExtractFromRegions(bytes, bytes, bytes.Length);
 
-        int tailStart = Math.Max(0, bytes.Length - FlashRegionSize);
-        int tailLen = bytes.Length - tailStart;
-        var tailBuf = new byte[tailLen];
-        Array.Copy(bytes, tailStart, tailBuf, 0, tailLen);
+        var headBuf = new byte[FlashRegionSize];
+        Array.Copy(bytes, headBuf, FlashRegionSize);
+
+        int tailStart = bytes.Length - FlashRegionSize;
+        var tailBuf = new byte[FlashRegionSize];
+        Array.Copy(bytes, tailStart, tailBuf, 0, FlashRegionSize);
 
         return ExtractFromRegions(headBuf, tailBuf, bytes.Length);
     }
