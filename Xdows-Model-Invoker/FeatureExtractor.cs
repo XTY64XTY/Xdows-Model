@@ -112,6 +112,28 @@ internal static class ByteAnalysisHelper
             out zeroRunCount, out totalZeroRunLength, out _, out _, out _);
     }
 
+    private static readonly byte[] ByteClass = CreateByteClass();
+
+    private static byte[] CreateByteClass()
+    {
+        var classes = new byte[256];
+        for (int i = 0; i < 256; i++)
+        {
+            byte b = (byte)i;
+            byte c = 0;
+            if (b >= 0x80) c |= 0x01;
+            if (b == 9 || b == 10 || b == 13 || b == 32) c |= 0x02;
+            if (b >= 32 && b <= 126)
+            {
+                c |= 0x04;
+                if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122)) c |= 0x08;
+                else if (b >= 48 && b <= 57) c |= 0x10;
+            }
+            classes[i] = c;
+        }
+        return classes;
+    }
+
     public static void ComputeCommonStatsSpan(ReadOnlySpan<byte> bytes, Span<long> byteCounts,
         out int printableCount, out int controlCount, out int whitespaceCount,
         out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount,
@@ -133,29 +155,20 @@ internal static class ByteAnalysisHelper
         int currentZeroRun = 0;
         int currentNonZeroRun = 0;
 
+        ReadOnlySpan<byte> clsSpan = ByteClass;
         for (int i = 0; i < bytes.Length; i++)
         {
             byte b = bytes[i];
             byteCounts[b]++;
 
-            if (IsHighByte(b))
-                highByteCount++;
-
-            if (IsWhitespace(b))
-                whitespaceCount++;
-
-            if (IsPrintable(b))
-            {
-                printableCount++;
-                if (IsLetter(b))
-                    letterCount++;
-                else if (IsDigit(b))
-                    digitCount++;
-            }
-            else
-            {
-                controlCount++;
-            }
+            byte cls = clsSpan[b];
+            highByteCount += cls & 1;
+            whitespaceCount += (cls >> 1) & 1;
+            int printable = (cls >> 2) & 1;
+            printableCount += printable;
+            controlCount += printable ^ 1;
+            letterCount += (cls >> 3) & printable;
+            digitCount += (cls >> 4) & printable;
 
             if (b == 0)
             {
@@ -207,7 +220,7 @@ internal static class ByteAnalysisHelper
             if (count > 0)
             {
                 double p = (double)count / totalBytes;
-                entropy -= p * Math.Log(p, 2);
+                entropy -= p * Math.Log2(p);
             }
         }
         return entropy;
@@ -314,7 +327,7 @@ internal static class ByteAnalysisHelper
         if (analysisLen <= 0) { minEntropy = maxEntropy = 0; return; }
 
         int numBlocks = (analysisLen + blockSize - 1) / blockSize;
-        var blockCounts = new long[256];
+        Span<long> blockCounts = stackalloc long[256];
         double totalEntropy = 0;
         double totalEntropySq = 0;
 
@@ -324,11 +337,11 @@ internal static class ByteAnalysisHelper
             int end = Math.Min(start + blockSize, analysisLen);
             int currentBlockSize = end - start;
 
-            blockCounts.AsSpan().Clear();
+            blockCounts.Clear();
             for (int i = start; i < end; i++)
                 blockCounts[regionBytes[i]]++;
 
-            double blockEnt = ComputeEntropy(blockCounts.AsSpan(0, 256), currentBlockSize);
+            double blockEnt = ComputeEntropy(blockCounts, currentBlockSize);
 
             if (blockEnt < minEntropy) minEntropy = blockEnt;
             if (blockEnt > maxEntropy) maxEntropy = blockEnt;
@@ -462,7 +475,7 @@ public class FeatureExtractor
         double firstBlockEntropy = 0;
         double lastBlockEntropy = 0;
 
-        var blockByteCounts = new long[256];
+        Span<long> blockByteCounts = stackalloc long[256];
 
         for (int blockIdx = 0; blockIdx < numBlocks; blockIdx++)
         {
@@ -470,7 +483,7 @@ public class FeatureExtractor
             int end = Math.Min(start + blockSize, bytes.Length);
             int currentBlockSize = end - start;
 
-            blockByteCounts.AsSpan().Clear();
+            blockByteCounts.Clear();
 
             for (int i = start; i < end; i++)
                 blockByteCounts[bytes[i]]++;
