@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Xdows_Model_Config;
+using Xdows_Model_Invoker;
 
 namespace Xdows_Model_Caller;
 
@@ -54,6 +56,12 @@ internal class Program
     {
         SetConsoleOutputCP(65001);
         Console.OutputEncoding = Encoding.UTF8;
+
+        if (args.Length > 0 && args[0] == "-benchmark")
+        {
+            RunBenchmark(args);
+            return;
+        }
 
         Console.WriteLine("Xdows Model 调用器 By Shiyi");
         Console.WriteLine();
@@ -258,5 +266,47 @@ internal class Program
         {
             Console.WriteLine($"Virus({probability:F2}%)");
         }
+    }
+
+    private static void RunBenchmark(string[] args)
+    {
+        int iterations = 100;
+        string filePath = args.Length > 1 ? args[1] : string.Empty;
+        if (args.Length > 2 && int.TryParse(args[2], out int it))
+            iterations = it;
+
+        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+        {
+            Console.WriteLine("用法: -benchmark <文件路径> [迭代次数]");
+            return;
+        }
+
+        byte[] bytes = File.ReadAllBytes(filePath);
+        Console.WriteLine($"Benchmark: {filePath}");
+        Console.WriteLine($"FileSize: {bytes.Length:N0} bytes");
+        Console.WriteLine($"Iterations: {iterations}");
+        Console.WriteLine();
+
+        _ = FeatureExtractor.ExtractFromBytes(bytes);
+        _ = FlashFeatureExtractor.ExtractFromBytes(bytes);
+        _ = ProHybridFeatureExtractor.ExtractFromBytes(bytes);
+
+        var sw = Stopwatch.StartNew();
+        for (int i = 0; i < iterations; i++)
+            _ = FeatureExtractor.ExtractFromBytes(bytes);
+        sw.Stop();
+        Console.WriteLine($"Standard: {sw.Elapsed.TotalMilliseconds / iterations:F4} ms/iter");
+
+        sw.Restart();
+        for (int i = 0; i < iterations; i++)
+            _ = FlashFeatureExtractor.ExtractFromBytes(bytes);
+        sw.Stop();
+        Console.WriteLine($"Flash:    {sw.Elapsed.TotalMilliseconds / iterations:F4} ms/iter");
+
+        sw.Restart();
+        for (int i = 0; i < iterations; i++)
+            _ = ProHybridFeatureExtractor.ExtractFromBytes(bytes);
+        sw.Stop();
+        Console.WriteLine($"Pro:      {sw.Elapsed.TotalMilliseconds / iterations:F4} ms/iter");
     }
 }
