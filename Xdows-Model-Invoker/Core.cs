@@ -70,12 +70,13 @@ namespace Xdows_Model_Invoker
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("找不到指定文件", filePath);
 
+            Initialize(modelPath);
+
             var fileBytes = File.ReadAllBytes(filePath);
             if (!FeatureExtractor.IsPeFile(fileBytes))
                 throw new NotSupportedException("不支持该文件类型");
 
             var features = FeatureExtractor.ExtractFromBytes(fileBytes);
-            Initialize(modelPath);
             return PredictWithInitializedModel(features.ToFloatArray());
         }
 
@@ -84,8 +85,9 @@ namespace Xdows_Model_Invoker
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("找不到指定文件", filePath);
 
-            var features = FlashFeatureExtractor.ExtractFeatures(filePath);
             InitializeFlash(modelPath);
+
+            var features = FlashFeatureExtractor.ExtractFeatures(filePath);
             return PredictWithInitializedModel(features.ToFloatArray());
         }
 
@@ -136,6 +138,42 @@ namespace Xdows_Model_Invoker
                 _loadedModelPath = path;
                 _mode = mode;
                 _proFeatureDimension = null;
+
+                ValidateFeatureDimension(mode);
+            }
+        }
+
+        private static void ValidateFeatureDimension(ModelMode mode)
+        {
+            if (_session == null)
+                throw new InvalidOperationException("ModelInvoker 没有初始化");
+
+            int expected = mode switch
+            {
+                ModelMode.Flash => FeatureSchema.FlashFeatureCount,
+                ModelMode.Pro => FeatureSchema.ProHybridFeatureCount,
+                _ => FeatureSchema.StandardFeatureCount
+            };
+
+            if (mode == ModelMode.Pro)
+            {
+                ValidateProFeatureDimension();
+                return;
+            }
+
+            var inputMeta = _session.InputMetadata;
+            if (inputMeta.TryGetValue("Features", out var nodeMeta))
+            {
+                var dims = nodeMeta.Dimensions;
+                int actual = dims.Length == 2 && dims[1] > 0 ? dims[1]
+                    : dims.Length == 1 && dims[0] > 0 ? dims[0]
+                    : -1;
+
+                if (actual > 0 && actual != expected)
+                {
+                    throw new InvalidOperationException(
+                        $"{mode} 模型特征维度不匹配：当前模型为 {actual} 维，期望 {expected} 维。");
+                }
             }
         }
 
@@ -209,9 +247,9 @@ namespace Xdows_Model_Invoker
 
             int featureCount = _mode switch
             {
-                ModelMode.Flash => FlashFileFeatures.FeatureCount,
+                ModelMode.Flash => FeatureSchema.FlashFeatureCount,
                 ModelMode.Pro => GetProFeatureDimension(),
-                _ => FileFeatures.FeatureCount
+                _ => FeatureSchema.StandardFeatureCount
             };
 
             return RunInference(_session, features, featureCount, GetThreshold(_mode));
@@ -253,10 +291,10 @@ namespace Xdows_Model_Invoker
         private static void ValidateProFeatureDimension()
         {
             int featureCount = GetProFeatureDimension();
-            if (!ProHybridFileFeatures.IsProFeatureCount(featureCount))
+            if (featureCount != FeatureSchema.ProHybridFeatureCount)
             {
                 throw new InvalidOperationException(
-                    $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，期望 {ProHybridFileFeatures.FeatureCount} 维。请重新训练并导出新的 Xdows-Model-Pro.onnx。");
+                    $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，期望 {FeatureSchema.ProHybridFeatureCount} 维。请重新训练并导出新的 Xdows-Model-Pro.onnx。");
             }
         }
 
