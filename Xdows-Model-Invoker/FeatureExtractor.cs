@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
+using Xdows_Model_Config;
 
 namespace Xdows_Model_Invoker;
 
@@ -542,7 +543,7 @@ public class FeatureExtractor
 
 public class FlashFileFeatures
 {
-    public const int FeatureCount = 68;
+    public const int FeatureCount = FeatureSchema.FlashFeatureCount;
 
     public long FileSize { get; set; }
     public double Entropy { get; set; }
@@ -635,6 +636,54 @@ public class FlashFileFeatures
         features[idx++] = PeOptionalMagic;
 
         return features;
+    }
+
+    public void WriteTo(Span<float> destination)
+    {
+        int idx = 0;
+
+        destination[idx++] = (float)Math.Log(FileSize + 1);
+        destination[idx++] = (float)Entropy;
+        destination[idx++] = (float)ZeroByteRatio;
+        destination[idx++] = (float)HighEntropyRatio;
+        destination[idx++] = (float)PrintableCharRatio;
+        destination[idx++] = (float)ControlCharRatio;
+        destination[idx++] = (float)WhitespaceRatio;
+        destination[idx++] = (float)LetterRatio;
+        destination[idx++] = (float)DigitRatio;
+        destination[idx++] = UniqueBytes;
+        destination[idx++] = (float)MostCommonByteRatio;
+        destination[idx++] = MaxZeroByteRun;
+        destination[idx++] = (float)MeanByteValue;
+        destination[idx++] = (float)ByteValueVariance;
+        destination[idx++] = (float)ByteDistributionSkewness;
+        destination[idx++] = (float)ByteDistributionKurtosis;
+        destination[idx++] = (float)MeanZeroRunLength;
+        destination[idx++] = ZeroRunCount;
+
+        for (int i = 0; i < 32; i++)
+            destination[idx++] = ByteHistogram32[i];
+
+        destination[idx++] = (float)LowByteRatio;
+        destination[idx++] = (float)PrintableAsciiRatio;
+        destination[idx++] = (float)ExtendedAsciiRatio;
+        destination[idx++] = MaxNonZeroByteRun;
+        destination[idx++] = (float)MeanNonZeroRunLength;
+
+        destination[idx++] = (float)HeadBlockEntropyMin;
+        destination[idx++] = (float)HeadBlockEntropyMax;
+        destination[idx++] = (float)HeadBlockEntropyMean;
+        destination[idx++] = (float)HeadBlockEntropyVar;
+        destination[idx++] = (float)TailBlockEntropyMin;
+        destination[idx++] = (float)TailBlockEntropyMax;
+        destination[idx++] = (float)TailBlockEntropyMean;
+        destination[idx++] = (float)TailBlockEntropyVar;
+
+        destination[idx++] = PeNumberOfSections;
+        destination[idx++] = (float)PeTimeDateStamp;
+        destination[idx++] = PeCharacteristics;
+        destination[idx++] = (float)PeSizeOfHeaders;
+        destination[idx++] = PeOptionalMagic;
     }
 }
 
@@ -908,7 +957,7 @@ public class FlashFeatureExtractor
 
 public class FileFeatures
 {
-    public const int FeatureCount = 299;
+    public const int FeatureCount = FeatureSchema.StandardFeatureCount;
 
     public double[] ByteFrequency { get; set; } = new double[256];
     public long FileSize { get; set; }
@@ -1011,13 +1060,65 @@ public class FileFeatures
 
         return features;
     }
+
+    public void WriteTo(Span<float> destination)
+    {
+        int idx = 0;
+
+        for (int i = 0; i < 256; i++)
+            destination[idx++] = (float)ByteFrequency[i];
+
+        destination[idx++] = (float)Math.Log(FileSize + 1);
+        destination[idx++] = (float)Entropy;
+        destination[idx++] = (float)MinBlockEntropy;
+        destination[idx++] = (float)MaxBlockEntropy;
+        destination[idx++] = (float)MeanBlockEntropy;
+        destination[idx++] = (float)BlockEntropyVariance;
+        destination[idx++] = (float)MinEntropyBlockPosition;
+        destination[idx++] = (float)MaxEntropyBlockPosition;
+        destination[idx++] = (float)FirstBlockEntropy;
+        destination[idx++] = (float)LastBlockEntropy;
+        destination[idx++] = UniqueBytes;
+        destination[idx++] = MostCommonByte;
+        destination[idx++] = (float)MostCommonByteRatio;
+        destination[idx++] = LeastCommonByte;
+        destination[idx++] = (float)LeastCommonByteRatio;
+        destination[idx++] = (float)PrintableCharRatio;
+        destination[idx++] = (float)ControlCharRatio;
+        destination[idx++] = (float)WhitespaceRatio;
+        destination[idx++] = (float)LetterRatio;
+        destination[idx++] = (float)DigitRatio;
+        destination[idx++] = MaxZeroByteRun;
+        destination[idx++] = (float)ZeroByteRatio;
+        destination[idx++] = (float)HighEntropyRatio;
+        destination[idx++] = (float)MeanByteValue;
+        destination[idx++] = (float)ByteValueVariance;
+        destination[idx++] = (float)ByteDistributionSkewness;
+        destination[idx++] = (float)ByteDistributionKurtosis;
+        destination[idx++] = (float)MeanZeroRunLength;
+        destination[idx++] = ZeroRunCount;
+        destination[idx++] = (float)LowByteRatio;
+        destination[idx++] = (float)PrintableAsciiRatio;
+        destination[idx++] = (float)ExtendedAsciiRatio;
+        destination[idx++] = MaxNonZeroByteRun;
+        destination[idx++] = (float)MeanNonZeroRunLength;
+        destination[idx++] = PeNumberOfSections;
+        destination[idx++] = (float)PeTimeDateStamp;
+        destination[idx++] = PeCharacteristics;
+        destination[idx++] = (float)PeSizeOfHeaders;
+        destination[idx++] = PeOptionalMagic;
+        destination[idx++] = (float)HeadBlockEntropyMin;
+        destination[idx++] = (float)HeadBlockEntropyMax;
+        destination[idx++] = (float)HeadBlockEntropyMean;
+        destination[idx++] = (float)HeadBlockEntropyVar;
+    }
 }
 
 public class ProRawStatFeatures
 {
     public const int FeaturesPerSection = 40;
     public const int SectionCount = 3;
-    public const int TotalCount = FeaturesPerSection * SectionCount;
+    public const int TotalCount = FeatureSchema.ProRawStatCount;
     public const int SectionSize = 512;
 
     public float[] Features { get; } = new float[TotalCount];
@@ -1027,6 +1128,11 @@ public class ProRawStatFeatures
         var result = new float[TotalCount];
         Array.Copy(Features, result, TotalCount);
         return result;
+    }
+
+    public void WriteTo(Span<float> destination)
+    {
+        Features.AsSpan().CopyTo(destination);
     }
 }
 
@@ -1133,10 +1239,10 @@ public static class ProRawStatExtractor
 
 public class ProHybridFileFeatures
 {
-    public const int StructuralFeatureCount = 32;
+    public const int StructuralFeatureCount = FeatureSchema.ProStructuralCount;
     public const int RawStatFeatureCount = ProRawStatFeatures.TotalCount;
     public const int FixedFeatureCount = FileFeatures.FeatureCount + FlashFileFeatures.FeatureCount + StructuralFeatureCount;
-    public static int FeatureCount => FixedFeatureCount + RawStatFeatureCount;
+    public static int FeatureCount => FeatureSchema.ProHybridFeatureCount;
 
     public int FeatureLength { get; }
     public float[] Features { get; }
@@ -1177,23 +1283,21 @@ public static class ProHybridFeatureExtractor
             throw new NotSupportedException("不支持该文件类型");
 
         var result = new ProHybridFileFeatures();
+        var span = result.Features.AsSpan();
         int idx = 0;
 
-        CopyInto(FeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
-        CopyInto(FlashFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
-        CopyInto(ProRawStatExtractor.ExtractFromBytes(bytes).ToFloatArray(), result.Features, ref idx);
-        CopyInto(ExtractStructuralFeatures(bytes), result.Features, ref idx);
+        FeatureExtractor.ExtractFromBytes(bytes).WriteTo(span.Slice(idx, FileFeatures.FeatureCount));
+        idx += FileFeatures.FeatureCount;
+        FlashFeatureExtractor.ExtractFromBytes(bytes).WriteTo(span.Slice(idx, FlashFileFeatures.FeatureCount));
+        idx += FlashFileFeatures.FeatureCount;
+        ProRawStatExtractor.ExtractFromBytes(bytes).WriteTo(span.Slice(idx, ProRawStatFeatures.TotalCount));
+        idx += ProRawStatFeatures.TotalCount;
+        ExtractStructuralFeatures(bytes).AsSpan().CopyTo(span.Slice(idx, ProHybridFileFeatures.StructuralFeatureCount));
 
         return result;
     }
 
-    private static void CopyInto(float[] source, float[] destination, ref int offset)
-    {
-        Array.Copy(source, 0, destination, offset, source.Length);
-        offset += source.Length;
-    }
-
-    private static float[] ExtractStructuralFeatures(byte[] bytes)
+    public static float[] ExtractStructuralFeatures(byte[] bytes)
     {
         var features = new float[ProHybridFileFeatures.StructuralFeatureCount];
         if (!TryReadPeLayout(bytes, out var layout))

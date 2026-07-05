@@ -1,6 +1,7 @@
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Xdows_Model_Config;
+using Xdows_Model_Invoker;
 
 namespace Xdows_Model_Maker;
 
@@ -450,8 +451,7 @@ public class ModelTrainer
             }
         };
 
-        return _mlContext.Transforms.Concatenate("Features", "Features")
-            .Append(_mlContext.BinaryClassification.Trainers.LightGbm(options));
+        return _mlContext.BinaryClassification.Trainers.LightGbm(options);
     }
 
     private IEstimator<ITransformer> BuildFlashPipeline(string labelColumnName)
@@ -471,8 +471,7 @@ public class ModelTrainer
             }
         };
 
-        return _mlContext.Transforms.Concatenate("Features", "Features")
-            .Append(_mlContext.BinaryClassification.Trainers.LightGbm(options));
+        return _mlContext.BinaryClassification.Trainers.LightGbm(options);
     }
 
     private void EvaluateModel(ITransformer model, IDataView testData, string labelColumnName, double threshold)
