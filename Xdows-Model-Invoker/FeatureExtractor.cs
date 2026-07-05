@@ -267,7 +267,7 @@ internal static class ByteAnalysisHelper
         kurtosis = variance > 0 ? m4 / (variance * variance) - 3 : 0;
     }
 
-    public static double ComputeRegionEntropy(ReadOnlySpan<byte> bytes, int start, int length)
+    public static unsafe double ComputeRegionEntropy(ReadOnlySpan<byte> bytes, int start, int length)
     {
         int actualLength = Math.Min(length, bytes.Length - start);
         if (actualLength <= 0) return 0;
@@ -275,8 +275,13 @@ internal static class ByteAnalysisHelper
         Span<long> counts = stackalloc long[256];
         counts.Clear();
 
-        for (int i = start; i < start + actualLength; i++)
-            counts[bytes[i]]++;
+        fixed (byte* pBytes = bytes)
+        {
+            byte* p = pBytes + start;
+            byte* end = p + actualLength;
+            while (p < end)
+                counts[*p++]++;
+        }
 
         return ComputeEntropy(counts, actualLength);
     }
@@ -1439,27 +1444,48 @@ public static class ProHybridFeatureExtractor
         int rawMidZeroRun = 0, rawMidNonZeroRun = 0;
         int rawTailZeroRun = 0, rawTailNonZeroRun = 0;
 
-        for (int i = 0; i < len; i++)
+        Span<int> points = stackalloc int[8];
+        points[0] = 0;
+        points[1] = rawHeadLen;
+        points[2] = headLen;
+        points[3] = rawMidStart;
+        points[4] = rawMidEnd;
+        points[5] = tailStart;
+        points[6] = rawTailStart;
+        points[7] = len;
+        points.Sort();
+
+        for (int seg = 0; seg < points.Length - 1; seg++)
         {
-            byte b = bytes[i];
-            byte cls = clsSpan[b];
+            int segStart = points[seg];
+            int segEnd = points[seg + 1];
+            if (segStart >= segEnd)
+                continue;
 
-            UpdateRegion(fullStats, b, cls, ref fullZeroRun, ref fullNonZeroRun);
+            bool inHead = segStart < headLen && segEnd > 0;
+            bool inTail = segStart < len && segEnd > tailStart;
+            bool inRawHead = segStart < rawHeadLen && segEnd > 0;
+            bool inRawMid = segStart < rawMidEnd && segEnd > rawMidStart;
+            bool inRawTail = segStart < len && segEnd > rawTailStart;
 
-            if (i < headLen)
-                UpdateRegion(headStats, b, cls, ref headZeroRun, ref headNonZeroRun);
+            for (int i = segStart; i < segEnd; i++)
+            {
+                byte b = bytes[i];
+                byte cls = clsSpan[b];
 
-            if (i >= tailStart)
-                UpdateRegion(tailStats, b, cls, ref tailZeroRun, ref tailNonZeroRun);
+                UpdateRegion(fullStats, b, cls, ref fullZeroRun, ref fullNonZeroRun);
 
-            if (i < rawHeadLen)
-                UpdateRegion(rawHeadStats, b, cls, ref rawHeadZeroRun, ref rawHeadNonZeroRun);
-
-            if (i >= rawMidStart && i < rawMidEnd)
-                UpdateRegion(rawMidStats, b, cls, ref rawMidZeroRun, ref rawMidNonZeroRun);
-
-            if (i >= rawTailStart)
-                UpdateRegion(rawTailStats, b, cls, ref rawTailZeroRun, ref rawTailNonZeroRun);
+                if (inHead)
+                    UpdateRegion(headStats, b, cls, ref headZeroRun, ref headNonZeroRun);
+                if (inTail)
+                    UpdateRegion(tailStats, b, cls, ref tailZeroRun, ref tailNonZeroRun);
+                if (inRawHead)
+                    UpdateRegion(rawHeadStats, b, cls, ref rawHeadZeroRun, ref rawHeadNonZeroRun);
+                if (inRawMid)
+                    UpdateRegion(rawMidStats, b, cls, ref rawMidZeroRun, ref rawMidNonZeroRun);
+                if (inRawTail)
+                    UpdateRegion(rawTailStats, b, cls, ref rawTailZeroRun, ref rawTailNonZeroRun);
+            }
         }
 
         FinalizeRegion(fullStats, fullZeroRun, fullNonZeroRun);
@@ -1673,6 +1699,29 @@ public static class ProHybridFeatureExtractor
         destination[offset + 39] = fileSize > 0 ? (float)length / fileSize : 0f;
     }
 
+    private static double ComputeSectionEntropy(byte[] bytes, int start, int length)
+    {
+        const int MaxSectionEntropyBytes = 128 * 1024;
+        if (length <= MaxSectionEntropyBytes)
+            return ByteAnalysisHelper.ComputeRegionEntropy(bytes, start, length);
+
+        Span<long> counts = stackalloc long[256];
+        counts.Clear();
+
+        int step = length / MaxSectionEntropyBytes;
+        int sampled = 0;
+        for (int i = 0; i < MaxSectionEntropyBytes; i++)
+        {
+            int idx = start + i * step;
+            if (idx >= start + length)
+                break;
+            counts[bytes[idx]]++;
+            sampled++;
+        }
+
+        return sampled > 0 ? ByteAnalysisHelper.ComputeEntropy(counts, sampled) : 0;
+    }
+
     public static float[] ExtractStructuralFeatures(byte[] bytes)
     {
         var features = new float[ProHybridFileFeatures.StructuralFeatureCount];
@@ -1743,7 +1792,7 @@ public static class ProHybridFeatureExtractor
                 availableRawSize = (int)Math.Min(rawSize, bytes.Length - rawPointer);
 
             double entropy = availableRawSize > 0
-                ? ByteAnalysisHelper.ComputeRegionEntropy(bytes, (int)rawPointer, availableRawSize)
+                ? ComputeSectionEntropy(bytes, (int)rawPointer, availableRawSize)
                 : 0;
 
             entropySum += entropy;
