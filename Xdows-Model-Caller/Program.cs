@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Xdows_Model_Config;
@@ -60,6 +61,12 @@ internal class Program
         if (args.Length > 0 && args[0] == "-benchmark")
         {
             RunBenchmark(args);
+            return;
+        }
+
+        if (args.Length > 0 && args[0] == "-dumpfeatures")
+        {
+            RunDumpFeatures(args);
             return;
         }
 
@@ -266,6 +273,41 @@ internal class Program
         {
             Console.WriteLine($"Virus({probability:F2}%)");
         }
+    }
+
+    private static void RunDumpFeatures(string[] args)
+    {
+        string filePath = args.Length > 1 ? args[1] : string.Empty;
+        string outPath = args.Length > 2 ? args[2] : "features.csv";
+        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+        {
+            Console.WriteLine("用法: -dumpfeatures <文件路径> <输出CSV>");
+            return;
+        }
+
+        byte[] bytes = File.ReadAllBytes(filePath);
+        var standard = FeatureExtractor.ExtractFromBytes(bytes);
+        var flash = FlashFeatureExtractor.ExtractFromBytes(bytes);
+        var pro = ProHybridFeatureExtractor.ExtractFromBytes(bytes);
+
+        using var writer = new StreamWriter(outPath);
+        writer.WriteLine("mode,index,value");
+
+        Span<float> buffer = stackalloc float[FeatureSchema.ProHybridFeatureCount];
+
+        standard.WriteTo(buffer.Slice(0, FileFeatures.FeatureCount));
+        for (int i = 0; i < FileFeatures.FeatureCount; i++)
+            writer.WriteLine($"standard,{i},{buffer[i].ToString(CultureInfo.InvariantCulture)}");
+
+        flash.WriteTo(buffer.Slice(0, FlashFileFeatures.FeatureCount));
+        for (int i = 0; i < FlashFileFeatures.FeatureCount; i++)
+            writer.WriteLine($"flash,{i},{buffer[i].ToString(CultureInfo.InvariantCulture)}");
+
+        pro.Features.AsSpan().CopyTo(buffer.Slice(0, ProHybridFileFeatures.FeatureCount));
+        for (int i = 0; i < ProHybridFileFeatures.FeatureCount; i++)
+            writer.WriteLine($"pro,{i},{buffer[i].ToString(CultureInfo.InvariantCulture)}");
+
+        Console.WriteLine($"特征已导出: {outPath}");
     }
 
     private static void RunBenchmark(string[] args)

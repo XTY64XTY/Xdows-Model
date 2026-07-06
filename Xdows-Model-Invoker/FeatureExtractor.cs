@@ -286,7 +286,7 @@ internal static class ByteAnalysisHelper
         return ComputeEntropy(counts, actualLength);
     }
 
-    public static void ComputeByteHistogram32(Span<long> byteCounts, int totalBytes, float[] histogram32)
+    public static void ComputeByteHistogram32(Span<long> byteCounts, int totalBytes, Span<float> histogram32)
     {
         for (int bin = 0; bin < 32; bin++)
         {
@@ -320,7 +320,7 @@ internal static class ByteAnalysisHelper
         extendedAsciiRatio = (double)extendedAscii / totalBytes;
     }
 
-    public static void ComputeBlockEntropyStats(byte[] regionBytes, int blockSize, int maxRegionSize,
+    public static void ComputeBlockEntropyStats(ReadOnlySpan<byte> regionBytes, int blockSize, int maxRegionSize,
         out double minEntropy, out double maxEntropy, out double meanEntropy, out double variance)
     {
         minEntropy = double.MaxValue;
@@ -343,8 +343,17 @@ internal static class ByteAnalysisHelper
             int currentBlockSize = end - start;
 
             blockCounts.Clear();
-            for (int i = start; i < end; i++)
-                blockCounts[regionBytes[i]]++;
+            unsafe
+            {
+                fixed (byte* pBytes = regionBytes)
+                fixed (long* pCounts = blockCounts)
+                {
+                    byte* p = pBytes + start;
+                    byte* endP = p + currentBlockSize;
+                    while (p < endP)
+                        pCounts[*p++]++;
+                }
+            }
 
             double blockEnt = ComputeEntropy(blockCounts, currentBlockSize);
 
@@ -490,8 +499,17 @@ public class FeatureExtractor
 
             blockByteCounts.Clear();
 
-            for (int i = start; i < end; i++)
-                blockByteCounts[bytes[i]]++;
+            unsafe
+            {
+                fixed (byte* pBytes = bytes)
+                fixed (long* pCounts = blockByteCounts)
+                {
+                    byte* p = pBytes + start;
+                    byte* endP = p + currentBlockSize;
+                    while (p < endP)
+                        pCounts[*p++]++;
+                }
+            }
 
             double blockEntropy = ByteAnalysisHelper.ComputeEntropy(blockByteCounts, currentBlockSize);
 
@@ -526,7 +544,7 @@ public class FeatureExtractor
         features.LastBlockEntropy = lastBlockEntropy;
     }
 
-    internal static void ParsePeHeader(byte[] headerBytes, FileFeatures features)
+    internal static void ParsePeHeader(ReadOnlySpan<byte> headerBytes, FileFeatures features)
     {
         features.PeNumberOfSections = 0;
         features.PeTimeDateStamp = 0;
@@ -536,24 +554,24 @@ public class FeatureExtractor
 
         if (headerBytes.Length < 64) return;
 
-        int peOffset = BitConverter.ToInt32(headerBytes, 60);
+        int peOffset = BitConverter.ToInt32(headerBytes.Slice(60, 4));
         if (peOffset < 0 || peOffset + 24 > headerBytes.Length || headerBytes[peOffset] != 'P' || headerBytes[peOffset + 1] != 'E')
             return;
 
-        features.PeNumberOfSections = BitConverter.ToInt16(headerBytes, peOffset + 6);
-        features.PeTimeDateStamp = BitConverter.ToUInt32(headerBytes, peOffset + 8);
-        features.PeCharacteristics = BitConverter.ToUInt16(headerBytes, peOffset + 22);
+        features.PeNumberOfSections = BitConverter.ToInt16(headerBytes.Slice(peOffset + 6, 2));
+        features.PeTimeDateStamp = BitConverter.ToUInt32(headerBytes.Slice(peOffset + 8, 4));
+        features.PeCharacteristics = BitConverter.ToUInt16(headerBytes.Slice(peOffset + 22, 2));
 
         int optHeaderOffset = peOffset + 24;
         if (optHeaderOffset + 2 > headerBytes.Length) return;
 
-        features.PeOptionalMagic = BitConverter.ToUInt16(headerBytes, optHeaderOffset);
+        features.PeOptionalMagic = BitConverter.ToUInt16(headerBytes.Slice(optHeaderOffset, 2));
 
         bool isPe32 = features.PeOptionalMagic == 0x10b;
         int sizeOfHeadersFieldOffset = isPe32 ? optHeaderOffset + 60 : optHeaderOffset + 84;
 
         if (sizeOfHeadersFieldOffset + 4 <= headerBytes.Length)
-            features.PeSizeOfHeaders = BitConverter.ToUInt32(headerBytes, sizeOfHeadersFieldOffset);
+            features.PeSizeOfHeaders = BitConverter.ToUInt32(headerBytes.Slice(sizeOfHeadersFieldOffset, 4));
     }
 
     public static bool IsPeFile(byte[] bytes) => ByteAnalysisHelper.IsPeFile(bytes);
@@ -723,8 +741,8 @@ public class FlashFeatureExtractor
         if (fileSize < 64)
             throw new NotSupportedException("文件过小，无法进行PE格式验证");
 
-        byte[] headBuf, tailBuf;
-        int headRead, tailRead;
+        byte[] headBuf;
+        int headRead;
 
         using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
         {
@@ -741,30 +759,23 @@ public class FlashFeatureExtractor
             }
             if (headRead < headBuf.Length) Array.Resize(ref headBuf, headRead);
 
-            tailBuf = new byte[(int)Math.Min(fileSize, FlashRegionSize)];
-            long tailPos = Math.Max(0, fileSize - FlashRegionSize);
-            if (tailPos >= headRead)
+            if (fileSize <= FlashRegionSize)
+                return ExtractFromRegions(headBuf.AsSpan(0, headRead), headBuf.AsSpan(0, headRead), fileSize);
+
+            var tailBuf = new byte[FlashRegionSize];
+            long tailPos = fileSize - FlashRegionSize;
+            fs.Position = tailPos;
+            int tailRead = fs.Read(tailBuf, 0, tailBuf.Length);
+            while (tailRead < tailBuf.Length)
             {
-                fs.Position = tailPos;
-                tailRead = fs.Read(tailBuf, 0, tailBuf.Length);
-                while (tailRead < tailBuf.Length)
-                {
-                    int read = fs.Read(tailBuf, tailRead, tailBuf.Length - tailRead);
-                    if (read == 0) break;
-                    tailRead += read;
-                }
-            }
-            else
-            {
-                int overlapStart = (int)tailPos;
-                int copyLen = Math.Min(headRead - overlapStart, tailBuf.Length);
-                Array.Copy(headBuf, overlapStart, tailBuf, 0, copyLen);
-                tailRead = copyLen;
+                int read = fs.Read(tailBuf, tailRead, tailBuf.Length - tailRead);
+                if (read == 0) break;
+                tailRead += read;
             }
             if (tailRead < tailBuf.Length) Array.Resize(ref tailBuf, tailRead);
-        }
 
-        return ExtractFromRegions(headBuf, tailBuf, fileSize);
+            return ExtractFromRegions(headBuf.AsSpan(0, headRead), tailBuf.AsSpan(0, tailRead), fileSize);
+        }
     }
 
     public static async Task<FlashFileFeatures> ExtractFeaturesAsync(string filePath)
@@ -778,8 +789,8 @@ public class FlashFeatureExtractor
         if (fileSize < 64)
             throw new NotSupportedException("文件过小，无法进行PE格式验证");
 
-        byte[] headBuf, tailBuf;
-        int headRead, tailRead;
+        byte[] headBuf;
+        int headRead;
 
         using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
         {
@@ -796,30 +807,23 @@ public class FlashFeatureExtractor
             }
             if (headRead < headBuf.Length) Array.Resize(ref headBuf, headRead);
 
-            tailBuf = new byte[(int)Math.Min(fileSize, FlashRegionSize)];
-            long tailPos = Math.Max(0, fileSize - FlashRegionSize);
-            if (tailPos >= headRead)
+            if (fileSize <= FlashRegionSize)
+                return ExtractFromRegions(headBuf.AsSpan(0, headRead), headBuf.AsSpan(0, headRead), fileSize);
+
+            var tailBuf = new byte[FlashRegionSize];
+            long tailPos = fileSize - FlashRegionSize;
+            fs.Position = tailPos;
+            int tailRead = await fs.ReadAsync(tailBuf, 0, tailBuf.Length);
+            while (tailRead < tailBuf.Length)
             {
-                fs.Position = tailPos;
-                tailRead = await fs.ReadAsync(tailBuf, 0, tailBuf.Length);
-                while (tailRead < tailBuf.Length)
-                {
-                    int read = await fs.ReadAsync(tailBuf, tailRead, tailBuf.Length - tailRead);
-                    if (read == 0) break;
-                    tailRead += read;
-                }
-            }
-            else
-            {
-                int overlapStart = (int)tailPos;
-                int copyLen = Math.Min(headRead - overlapStart, tailBuf.Length);
-                Array.Copy(headBuf, overlapStart, tailBuf, 0, copyLen);
-                tailRead = copyLen;
+                int read = await fs.ReadAsync(tailBuf, tailRead, tailBuf.Length - tailRead);
+                if (read == 0) break;
+                tailRead += read;
             }
             if (tailRead < tailBuf.Length) Array.Resize(ref tailBuf, tailRead);
-        }
 
-        return ExtractFromRegions(headBuf, tailBuf, fileSize);
+            return ExtractFromRegions(headBuf.AsSpan(0, headRead), tailBuf.AsSpan(0, tailRead), fileSize);
+        }
     }
 
     public static FlashFileFeatures ExtractFromBytes(byte[] bytes)
@@ -830,17 +834,12 @@ public class FlashFeatureExtractor
         if (bytes.Length <= FlashRegionSize)
             return ExtractFromRegions(bytes, bytes, bytes.Length);
 
-        var headBuf = new byte[FlashRegionSize];
-        Array.Copy(bytes, headBuf, FlashRegionSize);
-
-        int tailStart = bytes.Length - FlashRegionSize;
-        var tailBuf = new byte[FlashRegionSize];
-        Array.Copy(bytes, tailStart, tailBuf, 0, FlashRegionSize);
-
-        return ExtractFromRegions(headBuf, tailBuf, bytes.Length);
+        ReadOnlySpan<byte> headSpan = bytes.AsSpan(0, FlashRegionSize);
+        ReadOnlySpan<byte> tailSpan = bytes.AsSpan(bytes.Length - FlashRegionSize, FlashRegionSize);
+        return ExtractFromRegions(headSpan, tailSpan, bytes.Length);
     }
 
-    internal static FlashFileFeatures ExtractFromRegions(byte[] headBytes, byte[] tailBytes, long actualFileSize)
+    internal static FlashFileFeatures ExtractFromRegions(ReadOnlySpan<byte> headBytes, ReadOnlySpan<byte> tailBytes, long actualFileSize)
     {
         var features = new FlashFileFeatures { FileSize = actualFileSize };
 
@@ -897,7 +896,7 @@ public class FlashFeatureExtractor
         features.HeadBlockEntropyMean = hMean;
         features.HeadBlockEntropyVar = hVar;
 
-        if (tailBytes.Length > 0 && !ReferenceEquals(tailBytes, headBytes))
+        if (tailBytes.Length > 0 && tailBytes != headBytes)
         {
             ByteAnalysisHelper.ComputeBlockEntropyStats(tailBytes, BlockEntropyBlockSize, BlockEntropyRegionSize,
                 out double tMin, out double tMax, out double tMean, out double tVar);
@@ -919,7 +918,7 @@ public class FlashFeatureExtractor
         return features;
     }
 
-    internal static void ParsePeHeader(byte[] headerBytes, FlashFileFeatures features)
+    internal static void ParsePeHeader(ReadOnlySpan<byte> headerBytes, FlashFileFeatures features)
     {
         features.PeNumberOfSections = 0;
         features.PeTimeDateStamp = 0;
@@ -929,24 +928,24 @@ public class FlashFeatureExtractor
 
         if (headerBytes.Length < 64) return;
 
-        int peOffset = BitConverter.ToInt32(headerBytes, 60);
+        int peOffset = BitConverter.ToInt32(headerBytes.Slice(60, 4));
         if (peOffset < 0 || peOffset + 24 > headerBytes.Length || headerBytes[peOffset] != 'P' || headerBytes[peOffset + 1] != 'E')
             return;
 
-        features.PeNumberOfSections = BitConverter.ToInt16(headerBytes, peOffset + 6);
-        features.PeTimeDateStamp = BitConverter.ToUInt32(headerBytes, peOffset + 8);
-        features.PeCharacteristics = BitConverter.ToUInt16(headerBytes, peOffset + 22);
+        features.PeNumberOfSections = BitConverter.ToInt16(headerBytes.Slice(peOffset + 6, 2));
+        features.PeTimeDateStamp = BitConverter.ToUInt32(headerBytes.Slice(peOffset + 8, 4));
+        features.PeCharacteristics = BitConverter.ToUInt16(headerBytes.Slice(peOffset + 22, 2));
 
         int optHeaderOffset = peOffset + 24;
         if (optHeaderOffset + 2 > headerBytes.Length) return;
 
-        features.PeOptionalMagic = BitConverter.ToUInt16(headerBytes, optHeaderOffset);
+        features.PeOptionalMagic = BitConverter.ToUInt16(headerBytes.Slice(optHeaderOffset, 2));
 
         bool isPe32 = features.PeOptionalMagic == 0x10b;
         int sizeOfHeadersFieldOffset = isPe32 ? optHeaderOffset + 60 : optHeaderOffset + 84;
 
         if (sizeOfHeadersFieldOffset + 4 <= headerBytes.Length)
-            features.PeSizeOfHeaders = BitConverter.ToUInt32(headerBytes, sizeOfHeadersFieldOffset);
+            features.PeSizeOfHeaders = BitConverter.ToUInt32(headerBytes.Slice(sizeOfHeadersFieldOffset, 4));
     }
 
     public static bool IsPeFile(byte[] bytes) => ByteAnalysisHelper.IsPeFile(bytes);
@@ -1187,71 +1186,19 @@ public static class ProRawStatExtractor
             return;
 
         Span<long> byteCounts = stackalloc long[256];
-        byteCounts.Clear();
+        ByteAnalysisHelper.ComputeCommonStatsSpan(bytes.AsSpan(start, actualLength), byteCounts,
+            out int printableCount, out _, out _, out int letterCount, out int digitCount,
+            out int maxZeroRun, out int highByteCount, out _, out _, out _, out _, out _);
 
-        int printableCount = 0;
-        int letterCount = 0;
-        int digitCount = 0;
-        int highByteCount = 0;
-        int zeroCount = 0;
-        int maxZeroRun = 0;
-        int currentZeroRun = 0;
+        destination[offset + 0] = (float)ByteAnalysisHelper.ComputeEntropy(byteCounts, actualLength);
+        ByteAnalysisHelper.ComputeByteHistogram32(byteCounts, actualLength, destination.AsSpan(offset + 1, 32));
 
-        for (int i = 0; i < actualLength; i++)
-        {
-            byte b = bytes[start + i];
-            byteCounts[b]++;
-
-            if (b == 0)
-            {
-                zeroCount++;
-                currentZeroRun++;
-                if (currentZeroRun > maxZeroRun)
-                    maxZeroRun = currentZeroRun;
-            }
-            else
-            {
-                currentZeroRun = 0;
-            }
-
-            if (b >= 0x80)
-                highByteCount++;
-
-            if (b >= 32 && b <= 126)
-            {
-                printableCount++;
-                if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122))
-                    letterCount++;
-                else if (b >= 48 && b <= 57)
-                    digitCount++;
-            }
-        }
-
-        double entropy = 0;
-        for (int i = 0; i < 256; i++)
-        {
-            if (byteCounts[i] > 0)
-            {
-                double p = (double)byteCounts[i] / actualLength;
-                entropy -= p * Math.Log2(p);
-            }
-        }
-        destination[offset + 0] = (float)entropy;
-
-        for (int bin = 0; bin < 32; bin++)
-        {
-            long sum = 0;
-            for (int j = 0; j < 8; j++)
-                sum += byteCounts[bin * 8 + j];
-            destination[offset + 1 + bin] = actualLength > 0 ? (float)sum / actualLength : 0f;
-        }
-
-        destination[offset + 33] = actualLength > 0 ? (float)printableCount / actualLength : 0f;
-        destination[offset + 34] = actualLength > 0 ? (float)zeroCount / actualLength : 0f;
-        destination[offset + 35] = actualLength > 0 ? (float)highByteCount / actualLength : 0f;
-        destination[offset + 36] = actualLength > 0 ? (float)letterCount / actualLength : 0f;
-        destination[offset + 37] = actualLength > 0 ? (float)digitCount / actualLength : 0f;
-        destination[offset + 38] = actualLength > 0 ? (float)maxZeroRun / actualLength : 0f;
+        destination[offset + 33] = (float)printableCount / actualLength;
+        destination[offset + 34] = (float)byteCounts[0] / actualLength;
+        destination[offset + 35] = (float)highByteCount / actualLength;
+        destination[offset + 36] = (float)letterCount / actualLength;
+        destination[offset + 37] = (float)digitCount / actualLength;
+        destination[offset + 38] = (float)maxZeroRun / actualLength;
         destination[offset + 39] = fileSize > 0 ? (float)actualLength / fileSize : 0f;
     }
 }
@@ -1305,22 +1252,13 @@ public static class ProHybridFeatureExtractor
         var span = result.Features.AsSpan();
         int idx = 0;
 
-        ComputeUnifiedStats(bytes,
-            out RegionStats fullStats,
-            out RegionStats headStats, out int headLen,
-            out RegionStats tailStats, out int tailStart,
-            out RegionStats rawHeadStats,
-            out RegionStats rawMidStats,
-            out RegionStats rawTailStats);
-
-        BuildStandardFeatures(bytes, fullStats).WriteTo(span.Slice(idx, FileFeatures.FeatureCount));
+        FeatureExtractor.ExtractFromBytes(bytes).WriteTo(span.Slice(idx, FileFeatures.FeatureCount));
         idx += FileFeatures.FeatureCount;
 
-        (byte[] headBytes, byte[] tailBytes) = GetHeadTailBytes(bytes, headLen, tailStart);
-        BuildFlashFeatures(headBytes, tailBytes, headStats, tailStats, bytes.Length).WriteTo(span.Slice(idx, FlashFileFeatures.FeatureCount));
+        FlashFeatureExtractor.ExtractFromBytes(bytes).WriteTo(span.Slice(idx, FlashFileFeatures.FeatureCount));
         idx += FlashFileFeatures.FeatureCount;
 
-        BuildProRawStatFeatures(rawHeadStats, rawMidStats, rawTailStats, bytes.Length).WriteTo(span.Slice(idx, ProRawStatFeatures.TotalCount));
+        ProRawStatExtractor.ExtractFromBytes(bytes).WriteTo(span.Slice(idx, ProRawStatFeatures.TotalCount));
         idx += ProRawStatFeatures.TotalCount;
 
         ExtractStructuralFeatures(bytes).AsSpan().CopyTo(span.Slice(idx, ProHybridFileFeatures.StructuralFeatureCount));
@@ -1328,398 +1266,15 @@ public static class ProHybridFeatureExtractor
         return result;
     }
 
-    private sealed class RegionStats
-    {
-        private readonly long[] _counts;
-        private readonly int _offset;
-
-        public RegionStats(long[] counts, int offset)
-        {
-            _counts = counts;
-            _offset = offset;
-        }
-
-        public Span<long> Counts => _counts.AsSpan(_offset, 256);
-
-        public int PrintableCount { get; set; }
-        public int ControlCount { get; set; }
-        public int WhitespaceCount { get; set; }
-        public int LetterCount { get; set; }
-        public int DigitCount { get; set; }
-        public int MaxZeroRun { get; set; }
-        public int HighByteCount { get; set; }
-        public int ZeroRunCount { get; set; }
-        public long TotalZeroRunLength { get; set; }
-        public int MaxNonZeroRun { get; set; }
-        public long TotalNonZeroRunLength { get; set; }
-        public int NonZeroRunCount { get; set; }
-    }
-
-    private static void UpdateRegion(RegionStats stats, byte b, byte cls, ref int zeroRun, ref int nonZeroRun)
-    {
-        stats.Counts[b]++;
-
-        stats.HighByteCount += cls & 1;
-        stats.WhitespaceCount += (cls >> 1) & 1;
-        int printable = (cls >> 2) & 1;
-        stats.PrintableCount += printable;
-        stats.ControlCount += printable ^ 1;
-        stats.LetterCount += (cls >> 3) & printable;
-        stats.DigitCount += (cls >> 4) & printable;
-
-        if (b == 0)
-        {
-            if (nonZeroRun > 0)
-            {
-                stats.NonZeroRunCount++;
-                stats.TotalNonZeroRunLength += nonZeroRun;
-                if (nonZeroRun > stats.MaxNonZeroRun)
-                    stats.MaxNonZeroRun = nonZeroRun;
-                nonZeroRun = 0;
-            }
-            zeroRun++;
-            if (zeroRun > stats.MaxZeroRun)
-                stats.MaxZeroRun = zeroRun;
-        }
-        else
-        {
-            if (zeroRun > 0)
-            {
-                stats.ZeroRunCount++;
-                stats.TotalZeroRunLength += zeroRun;
-                zeroRun = 0;
-            }
-            nonZeroRun++;
-        }
-    }
-
-    private static void FinalizeRegion(RegionStats stats, int zeroRun, int nonZeroRun)
-    {
-        if (zeroRun > 0)
-        {
-            stats.ZeroRunCount++;
-            stats.TotalZeroRunLength += zeroRun;
-        }
-        if (nonZeroRun > 0)
-        {
-            stats.NonZeroRunCount++;
-            stats.TotalNonZeroRunLength += nonZeroRun;
-            if (nonZeroRun > stats.MaxNonZeroRun)
-                stats.MaxNonZeroRun = nonZeroRun;
-        }
-    }
-
-    private static void ComputeUnifiedStats(byte[] bytes,
-        out RegionStats fullStats,
-        out RegionStats headStats, out int headLen,
-        out RegionStats tailStats, out int tailStart,
-        out RegionStats rawHeadStats,
-        out RegionStats rawMidStats,
-        out RegionStats rawTailStats)
-    {
-        int len = bytes.Length;
-        headLen = Math.Min(len, FlashFeatureExtractor.FlashRegionSize);
-        tailStart = Math.Max(0, len - FlashFeatureExtractor.FlashRegionSize);
-
-        int rawHeadLen = Math.Min(len, ProRawStatFeatures.SectionSize);
-        int rawMidStart = Math.Max(0, len / 2 - ProRawStatFeatures.SectionSize / 2);
-        int rawMidEnd = Math.Min(len, rawMidStart + ProRawStatFeatures.SectionSize);
-        int rawTailStart = Math.Max(0, len - ProRawStatFeatures.SectionSize);
-
-        var counts = new long[6 * 256];
-
-        fullStats = new RegionStats(counts, 0);
-        headStats = new RegionStats(counts, 256);
-        tailStats = new RegionStats(counts, 512);
-        rawHeadStats = new RegionStats(counts, 768);
-        rawMidStats = new RegionStats(counts, 1024);
-        rawTailStats = new RegionStats(counts, 1280);
-
-        ReadOnlySpan<byte> clsSpan = ByteAnalysisHelper.ByteClass;
-
-        int fullZeroRun = 0, fullNonZeroRun = 0;
-        int headZeroRun = 0, headNonZeroRun = 0;
-        int tailZeroRun = 0, tailNonZeroRun = 0;
-        int rawHeadZeroRun = 0, rawHeadNonZeroRun = 0;
-        int rawMidZeroRun = 0, rawMidNonZeroRun = 0;
-        int rawTailZeroRun = 0, rawTailNonZeroRun = 0;
-
-        Span<int> points = stackalloc int[8];
-        points[0] = 0;
-        points[1] = rawHeadLen;
-        points[2] = headLen;
-        points[3] = rawMidStart;
-        points[4] = rawMidEnd;
-        points[5] = tailStart;
-        points[6] = rawTailStart;
-        points[7] = len;
-        points.Sort();
-
-        for (int seg = 0; seg < points.Length - 1; seg++)
-        {
-            int segStart = points[seg];
-            int segEnd = points[seg + 1];
-            if (segStart >= segEnd)
-                continue;
-
-            bool inHead = segStart < headLen && segEnd > 0;
-            bool inTail = segStart < len && segEnd > tailStart;
-            bool inRawHead = segStart < rawHeadLen && segEnd > 0;
-            bool inRawMid = segStart < rawMidEnd && segEnd > rawMidStart;
-            bool inRawTail = segStart < len && segEnd > rawTailStart;
-
-            for (int i = segStart; i < segEnd; i++)
-            {
-                byte b = bytes[i];
-                byte cls = clsSpan[b];
-
-                UpdateRegion(fullStats, b, cls, ref fullZeroRun, ref fullNonZeroRun);
-
-                if (inHead)
-                    UpdateRegion(headStats, b, cls, ref headZeroRun, ref headNonZeroRun);
-                if (inTail)
-                    UpdateRegion(tailStats, b, cls, ref tailZeroRun, ref tailNonZeroRun);
-                if (inRawHead)
-                    UpdateRegion(rawHeadStats, b, cls, ref rawHeadZeroRun, ref rawHeadNonZeroRun);
-                if (inRawMid)
-                    UpdateRegion(rawMidStats, b, cls, ref rawMidZeroRun, ref rawMidNonZeroRun);
-                if (inRawTail)
-                    UpdateRegion(rawTailStats, b, cls, ref rawTailZeroRun, ref rawTailNonZeroRun);
-            }
-        }
-
-        FinalizeRegion(fullStats, fullZeroRun, fullNonZeroRun);
-        FinalizeRegion(headStats, headZeroRun, headNonZeroRun);
-        FinalizeRegion(tailStats, tailZeroRun, tailNonZeroRun);
-        FinalizeRegion(rawHeadStats, rawHeadZeroRun, rawHeadNonZeroRun);
-        FinalizeRegion(rawMidStats, rawMidZeroRun, rawMidNonZeroRun);
-        FinalizeRegion(rawTailStats, rawTailZeroRun, rawTailNonZeroRun);
-    }
-
-    private static (byte[] headBytes, byte[] tailBytes) GetHeadTailBytes(byte[] bytes, int headLen, int tailStart)
-    {
-        if (bytes.Length <= FlashFeatureExtractor.FlashRegionSize)
-            return (bytes, bytes);
-
-        var headBytes = new byte[FlashFeatureExtractor.FlashRegionSize];
-        Array.Copy(bytes, headBytes, FlashFeatureExtractor.FlashRegionSize);
-
-        var tailBytes = new byte[FlashFeatureExtractor.FlashRegionSize];
-        Array.Copy(bytes, tailStart, tailBytes, 0, FlashFeatureExtractor.FlashRegionSize);
-
-        return (headBytes, tailBytes);
-    }
-
-    private static FileFeatures BuildStandardFeatures(byte[] bytes, RegionStats stats)
-    {
-        var features = new FileFeatures { FileSize = bytes.Length };
-        if (bytes.Length == 0)
-            return features;
-
-        int length = bytes.Length;
-        Span<long> byteCounts = stackalloc long[256];
-        stats.Counts.CopyTo(byteCounts);
-
-        int uniqueBytes = 0;
-        long maxCount = 0, minCount = long.MaxValue;
-        int mostCommonByte = 0, leastCommonByte = 0;
-
-        for (int i = 0; i < 256; i++)
-        {
-            features.ByteFrequency[i] = (double)byteCounts[i] / length;
-
-            long c = byteCounts[i];
-            if (c > 0) uniqueBytes++;
-            if (c > maxCount) { maxCount = c; mostCommonByte = i; }
-            if (c < minCount) { minCount = c; leastCommonByte = i; }
-        }
-
-        features.UniqueBytes = uniqueBytes;
-        features.MostCommonByte = mostCommonByte;
-        features.MostCommonByteRatio = (double)maxCount / length;
-        features.LeastCommonByte = leastCommonByte;
-        features.LeastCommonByteRatio = (double)minCount / length;
-        features.ZeroByteRatio = (double)byteCounts[0] / length;
-        features.HighEntropyRatio = (double)stats.HighByteCount / length;
-        features.Entropy = ByteAnalysisHelper.ComputeEntropy(byteCounts, length);
-
-        FeatureExtractor.ExtractBlockEntropyOptimized(bytes, features);
-
-        features.PrintableCharRatio = (double)stats.PrintableCount / length;
-        features.ControlCharRatio = (double)stats.ControlCount / length;
-        features.WhitespaceRatio = (double)stats.WhitespaceCount / length;
-        features.LetterRatio = (double)stats.LetterCount / length;
-        features.DigitRatio = (double)stats.DigitCount / length;
-        features.MaxZeroByteRun = stats.MaxZeroRun;
-
-        ByteAnalysisHelper.ComputeByteMoments(byteCounts, length,
-            out double meanByteValue, out double byteValueVariance,
-            out double skewness, out double kurtosis);
-
-        ByteAnalysisHelper.ComputeByteRangeRatios(byteCounts, length,
-            out double lowByteRatio, out double printableAsciiRatio, out double extendedAsciiRatio);
-
-        ByteAnalysisHelper.ComputeBlockEntropyStats(bytes, 4096, 128 * 1024,
-            out double headBlockEntropyMin, out double headBlockEntropyMax,
-            out double headBlockEntropyMean, out double headBlockEntropyVar);
-
-        features.MeanByteValue = meanByteValue;
-        features.ByteValueVariance = byteValueVariance;
-        features.ByteDistributionSkewness = skewness;
-        features.ByteDistributionKurtosis = kurtosis;
-        features.MeanZeroRunLength = stats.ZeroRunCount > 0 ? (double)stats.TotalZeroRunLength / stats.ZeroRunCount : 0;
-        features.ZeroRunCount = stats.ZeroRunCount;
-        features.LowByteRatio = lowByteRatio;
-        features.PrintableAsciiRatio = printableAsciiRatio;
-        features.ExtendedAsciiRatio = extendedAsciiRatio;
-        features.MaxNonZeroByteRun = stats.MaxNonZeroRun;
-        features.MeanNonZeroRunLength = stats.NonZeroRunCount > 0 ? (double)stats.TotalNonZeroRunLength / stats.NonZeroRunCount : 0;
-
-        FeatureExtractor.ParsePeHeader(bytes, features);
-
-        features.HeadBlockEntropyMin = headBlockEntropyMin;
-        features.HeadBlockEntropyMax = headBlockEntropyMax;
-        features.HeadBlockEntropyMean = headBlockEntropyMean;
-        features.HeadBlockEntropyVar = headBlockEntropyVar;
-
-        return features;
-    }
-
-    private static FlashFileFeatures BuildFlashFeatures(byte[] headBytes, byte[] tailBytes, RegionStats headStats, RegionStats tailStats, long fileSize)
-    {
-        var features = new FlashFileFeatures { FileSize = fileSize };
-
-        if (headBytes.Length == 0)
-            return features;
-
-        int headLen = headBytes.Length;
-        Span<long> headCounts = stackalloc long[256];
-        headStats.Counts.CopyTo(headCounts);
-
-        ByteAnalysisHelper.ComputeStatsSummary(headCounts, headLen,
-            out int uniqueBytes, out double mostCommonByteRatio, out double zeroByteRatio);
-
-        ByteAnalysisHelper.ComputeByteMoments(headCounts, headLen,
-            out double meanByteValue, out double byteValueVariance,
-            out double skewness, out double kurtosis);
-
-        ByteAnalysisHelper.ComputeByteHistogram32(headCounts, headLen, features.ByteHistogram32);
-        ByteAnalysisHelper.ComputeByteRangeRatios(headCounts, headLen,
-            out double lowByteRatio, out double printableAsciiRatio, out double extendedAsciiRatio);
-
-        features.UniqueBytes = uniqueBytes;
-        features.MostCommonByteRatio = mostCommonByteRatio;
-        features.ZeroByteRatio = zeroByteRatio;
-        features.HighEntropyRatio = (double)headStats.HighByteCount / headLen;
-        features.Entropy = ByteAnalysisHelper.ComputeEntropy(headCounts, headLen);
-        features.PrintableCharRatio = (double)headStats.PrintableCount / headLen;
-        features.ControlCharRatio = (double)headStats.ControlCount / headLen;
-        features.WhitespaceRatio = (double)headStats.WhitespaceCount / headLen;
-        features.LetterRatio = (double)headStats.LetterCount / headLen;
-        features.DigitRatio = (double)headStats.DigitCount / headLen;
-        features.MaxZeroByteRun = headStats.MaxZeroRun;
-        features.MeanByteValue = meanByteValue;
-        features.ByteValueVariance = byteValueVariance;
-        features.ByteDistributionSkewness = skewness;
-        features.ByteDistributionKurtosis = kurtosis;
-        features.MeanZeroRunLength = headStats.ZeroRunCount > 0 ? (double)headStats.TotalZeroRunLength / headStats.ZeroRunCount : 0;
-        features.ZeroRunCount = headStats.ZeroRunCount;
-
-        features.LowByteRatio = lowByteRatio;
-        features.PrintableAsciiRatio = printableAsciiRatio;
-        features.ExtendedAsciiRatio = extendedAsciiRatio;
-        features.MaxNonZeroByteRun = headStats.MaxNonZeroRun;
-        features.MeanNonZeroRunLength = headStats.NonZeroRunCount > 0 ? (double)headStats.TotalNonZeroRunLength / headStats.NonZeroRunCount : 0;
-
-        ByteAnalysisHelper.ComputeBlockEntropyStats(headBytes, FlashFeatureExtractor.BlockEntropyBlockSize, FlashFeatureExtractor.BlockEntropyRegionSize,
-            out double hMin, out double hMax, out double hMean, out double hVar);
-        features.HeadBlockEntropyMin = hMin;
-        features.HeadBlockEntropyMax = hMax;
-        features.HeadBlockEntropyMean = hMean;
-        features.HeadBlockEntropyVar = hVar;
-
-        if (tailBytes.Length > 0 && !ReferenceEquals(tailBytes, headBytes))
-        {
-            ByteAnalysisHelper.ComputeBlockEntropyStats(tailBytes, FlashFeatureExtractor.BlockEntropyBlockSize, FlashFeatureExtractor.BlockEntropyRegionSize,
-                out double tMin, out double tMax, out double tMean, out double tVar);
-            features.TailBlockEntropyMin = tMin;
-            features.TailBlockEntropyMax = tMax;
-            features.TailBlockEntropyMean = tMean;
-            features.TailBlockEntropyVar = tVar;
-        }
-        else
-        {
-            features.TailBlockEntropyMin = hMin;
-            features.TailBlockEntropyMax = hMax;
-            features.TailBlockEntropyMean = hMean;
-            features.TailBlockEntropyVar = hVar;
-        }
-
-        FlashFeatureExtractor.ParsePeHeader(headBytes, features);
-
-        return features;
-    }
-
-    private static ProRawStatFeatures BuildProRawStatFeatures(RegionStats headStats, RegionStats midStats, RegionStats tailStats, int fileSize)
-    {
-        var result = new ProRawStatFeatures();
-        FillSectionFromStats(headStats, fileSize, result.Features, 0);
-        FillSectionFromStats(midStats, fileSize, result.Features, ProRawStatFeatures.FeaturesPerSection);
-        FillSectionFromStats(tailStats, fileSize, result.Features, ProRawStatFeatures.FeaturesPerSection * 2);
-        return result;
-    }
-
-    private static void FillSectionFromStats(RegionStats stats, int fileSize, float[] destination, int offset)
-    {
-        int length = stats.PrintableCount + stats.ControlCount;
-        if (length <= 0)
-            return;
-
-        Span<long> byteCounts = stackalloc long[256];
-        stats.Counts.CopyTo(byteCounts);
-
-        double entropy = ByteAnalysisHelper.ComputeEntropy(byteCounts, length);
-        destination[offset + 0] = (float)entropy;
-
-        for (int bin = 0; bin < 32; bin++)
-        {
-            long sum = 0;
-            for (int j = 0; j < 8; j++)
-                sum += byteCounts[bin * 8 + j];
-            destination[offset + 1 + bin] = (float)sum / length;
-        }
-
-        int zeroCount = (int)byteCounts[0];
-        destination[offset + 33] = (float)stats.PrintableCount / length;
-        destination[offset + 34] = (float)zeroCount / length;
-        destination[offset + 35] = (float)stats.HighByteCount / length;
-        destination[offset + 36] = (float)stats.LetterCount / length;
-        destination[offset + 37] = (float)stats.DigitCount / length;
-        destination[offset + 38] = (float)stats.MaxZeroRun / length;
-        destination[offset + 39] = fileSize > 0 ? (float)length / fileSize : 0f;
-    }
 
     private static double ComputeSectionEntropy(byte[] bytes, int start, int length)
     {
         const int MaxSectionEntropyBytes = 128 * 1024;
-        if (length <= MaxSectionEntropyBytes)
-            return ByteAnalysisHelper.ComputeRegionEntropy(bytes, start, length);
+        int actualLength = Math.Min(length, MaxSectionEntropyBytes);
+        if (actualLength <= 0)
+            return 0;
 
-        Span<long> counts = stackalloc long[256];
-        counts.Clear();
-
-        int step = length / MaxSectionEntropyBytes;
-        int sampled = 0;
-        for (int i = 0; i < MaxSectionEntropyBytes; i++)
-        {
-            int idx = start + i * step;
-            if (idx >= start + length)
-                break;
-            counts[bytes[idx]]++;
-            sampled++;
-        }
-
-        return sampled > 0 ? ByteAnalysisHelper.ComputeEntropy(counts, sampled) : 0;
+        return ByteAnalysisHelper.ComputeRegionEntropy(bytes, start, actualLength);
     }
 
     public static float[] ExtractStructuralFeatures(byte[] bytes)
