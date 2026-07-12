@@ -9,14 +9,15 @@ public class ModelTrainer
 {
     private readonly MLContext _mlContext;
     private readonly TrainingConfig _config;
-    private readonly IProLearner _proLearner;
+    private readonly ProGbdtLearner _proLearner;
+    private ProStackingTrainingResult? _lastProTrainingResult;
     private volatile bool _proTrainingCancelled;
 
     public ModelTrainer(TrainingConfig config)
     {
         _config = config;
         _mlContext = new MLContext(seed: config.RandomSeed);
-        _proLearner = ProLearnerFactory.Create(config.ProLearner);
+        _proLearner = new ProGbdtLearner();
         _proTrainingCancelled = false;
     }
 
@@ -57,7 +58,7 @@ public class ModelTrainer
 
     private ITransformer? TrainPro(List<FileData> fileData, string modelPath, string? onnxPath)
     {
-        Console.WriteLine("\n开始训练 Pro 混合特征模型...");
+        Console.WriteLine("\n开始训练 Pro GBDT 混合特征模型...");
         Console.WriteLine($"固定特征组成：Standard {FileFeatures.FeatureCount} 维 + Flash {FlashFileFeatures.FeatureCount} 维 + RawStat {ProRawStatFeatures.TotalCount} 维 + PE结构 {ProHybridFileFeatures.StructuralFeatureCount} 维");
         Console.WriteLine($"总特征维度：{ProHybridFileFeatures.FeatureCount}\n");
 
@@ -74,42 +75,38 @@ public class ModelTrainer
             return null;
         }
 
-        var (model, evaluation, fullDataView) = TrainProStep(featureCache);
-        if (model == null || evaluation == null || fullDataView == null)
+        var result = TrainProStep(featureCache);
+        if (result == null)
         {
             Console.WriteLine("警告：Pro 混合特征模型未产生有效模型。");
             return null;
         }
 
         Console.WriteLine($"\n正在保存 Pro 模型...");
-        _mlContext.Model.Save(model, fullDataView.Schema, modelPath);
-        Console.WriteLine($"Pro ML.NET 模型已保存至: {modelPath}");
-
-        if (!string.IsNullOrEmpty(onnxPath))
+        try
         {
-            try
-            {
-                ExportToOnnx(model, fullDataView, onnxPath);
-                Console.WriteLine($"Pro ONNX 模型已保存至: {onnxPath}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Pro ONNX 导出失败：{ex.Message}");
-            }
+            result.SaveArtifacts(_mlContext, modelPath, onnxPath);
+            Console.WriteLine($"Pro 融合模型和 4 个分支模型已保存至: {Path.GetDirectoryName(modelPath)}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Pro 模型导出失败：{ex.Message}");
+            return null;
         }
 
-        WriteProEvaluationReport(modelPath, evaluation);
+        _lastProTrainingResult = result;
+        WriteProEvaluationReport(modelPath, result.Evaluation);
 
-        Console.WriteLine($"\n=== Pro 混合特征模型训练完成 ===");
+        Console.WriteLine($"\n=== Pro GBDT 混合特征模型训练完成 ===");
         Console.WriteLine($"最终特征维度：{ProHybridFileFeatures.FeatureCount}");
-        Console.WriteLine($"测试集 AUC：{evaluation.TestAuc:P4}");
-        Console.WriteLine($"训练集 AUC：{evaluation.TrainAuc:P4}");
-        Console.WriteLine($"AUC Gap：{evaluation.AucGap:P4}");
+        Console.WriteLine($"测试集 AUC：{result.Evaluation.TestAuc:P4}");
+        Console.WriteLine($"训练集 AUC：{result.Evaluation.TrainAuc:P4}");
+        Console.WriteLine($"AUC Gap：{result.Evaluation.AucGap:P4}");
 
-        return model;
+        return result.FusionModel;
     }
 
-    private (ITransformer? model, ProTrainingEvaluation? evaluation, IDataView? dataView) TrainProStep(ProFeatureCache featureCache)
+    private ProStackingTrainingResult? TrainProStep(ProFeatureCache featureCache)
     {
         int featureCount = ProHybridFileFeatures.FeatureCount;
 
@@ -150,7 +147,7 @@ public class ModelTrainer
         if (validData.Count == 0)
         {
             Console.WriteLine("  错误：没有有效的训练数据！");
-            return (null, default, null);
+            return null;
         }
 
         Console.WriteLine($"  有效训练数据：{validData.Count} 个");
@@ -162,82 +159,17 @@ public class ModelTrainer
         if (blackCount == 0 || whiteCount == 0)
         {
             Console.WriteLine("  错误：有效数据中只有一类标签，无法训练！");
-            return (null, default, null);
+            return null;
         }
 
-        var trainingData = validData.Select((fd, idx) => new ProBinaryTrainingData(featureCount)
-        {
-            Features = validFeatures[idx],
-            Label = fd.Label
-        }).ToList();
-
-        var schemaDef = SchemaDefinition.Create(typeof(ProBinaryTrainingData));
-        schemaDef["Features"].ColumnType = new VectorDataViewType(NumberDataViewType.Single, featureCount);
-
-        var fullDataView = _mlContext.Data.LoadFromEnumerable(trainingData, schemaDef);
-        var trainTestSplit = _mlContext.Data.TrainTestSplit(fullDataView, testFraction: 0.2);
-
-        var pipeline = _proLearner.BuildPipeline(_mlContext, _config, featureCount);
-        Console.WriteLine($"  正在训练 Pro {_proLearner.Name} 模型...");
-        var model = pipeline.Fit(trainTestSplit.TrainSet);
-
-        // 测试集评估
-        double testAuc, testAuprc;
-        ThresholdMetrics testThresholdMetrics, testBestThresholdMetrics;
-        double bestThreshold;
-        try
-        {
-            var testPredictions = model.Transform(trainTestSplit.TestSet);
-            var testMetrics = _mlContext.BinaryClassification.Evaluate(testPredictions);
-            testAuc = testMetrics.AreaUnderRocCurve;
-            testAuprc = testMetrics.AreaUnderPrecisionRecallCurve;
-            var testRows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(testPredictions, reuseRowObject: false).ToList();
-            testThresholdMetrics = ComputeThresholdMetrics(testRows, _config.ProThreshold);
-            (bestThreshold, testBestThresholdMetrics) = FindBestThreshold(testRows);
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            testAuc = double.NaN;
-            testAuprc = 0;
-            testThresholdMetrics = new ThresholdMetrics(0, 0, 0, 0, 0, 0, 0, 0);
-            testBestThresholdMetrics = testThresholdMetrics;
-            bestThreshold = _config.ProThreshold;
-            Console.WriteLine("  警告：测试集评估指标无法计算（类别不平衡）");
-        }
-
-        // 训练集评估（用于 train-test gap）
-        double trainAuc;
-        try
-        {
-            var trainPredictions = model.Transform(trainTestSplit.TrainSet);
-            var trainMetrics = _mlContext.BinaryClassification.Evaluate(trainPredictions);
-            trainAuc = trainMetrics.AreaUnderRocCurve;
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            trainAuc = double.NaN;
-        }
-
-        double aucGap = double.IsNaN(trainAuc) || double.IsNaN(testAuc) ? double.NaN : trainAuc - testAuc;
-
-        Console.WriteLine($"  阈值: {_config.ProThreshold:F2}%");
-        Console.WriteLine($"  === 测试集评估 ===");
-        Console.WriteLine($"  准确率: {testThresholdMetrics.Accuracy:P4}，AUC: {testAuc:P4}，AUPRC: {testAuprc:P4}，F1: {testThresholdMetrics.F1Score:P4}");
-        Console.WriteLine($"  检出率: {testThresholdMetrics.TruePositiveRate:P4}，误报率: {testThresholdMetrics.FalsePositiveRate:P4}");
-        Console.WriteLine($"  混淆矩阵: TP={testThresholdMetrics.TruePositive}, FN={testThresholdMetrics.FalseNegative}, FP={testThresholdMetrics.FalsePositive}, TN={testThresholdMetrics.TrueNegative}");
-        Console.WriteLine($"  最优 F1 阈值: {bestThreshold:F2}%");
-        Console.WriteLine($"  最优 F1: {testBestThresholdMetrics.F1Score:P4}，检出率: {testBestThresholdMetrics.TruePositiveRate:P4}，误报率: {testBestThresholdMetrics.FalsePositiveRate:P4}");
-        Console.WriteLine($"  === 训练集评估 ===");
-        Console.WriteLine($"  训练集 AUC: {trainAuc:P4}");
-        Console.WriteLine($"  === Train-Test Gap ===");
-        Console.WriteLine($"  AUC Gap: {aucGap:P4}{(double.IsNaN(aucGap) ? "  ⚠ 评估失败" : aucGap > 0.05 ? "  ⚠ 可能过拟合" : aucGap < -0.02 ? "  ⚠ 异常" : "")}");
-
-        var evaluation = new ProTrainingEvaluation(
-            testAuc, testAuprc, trainAuc, aucGap,
-            testThresholdMetrics, testBestThresholdMetrics, bestThreshold,
-            validData.Count, blackCount, whiteCount, featureCount);
-
-        return (model, evaluation, fullDataView);
+        var samples = validData.Select((fd, idx) => new ProStackingSample(validFeatures[idx], fd.Label)).ToList();
+        Console.WriteLine($"  正在训练 Pro {_proLearner.Name} Stacking 模型...");
+        var result = new ProStackingTrainer(_mlContext, _config, _proLearner).Train(samples);
+        var evaluation = result.Evaluation;
+        Console.WriteLine($"  测试集 AUC: {evaluation.TestAuc:P4}，AUPRC: {evaluation.TestAuprc:P4}");
+        Console.WriteLine($"  检出率: {evaluation.TestThresholdMetrics.TruePositiveRate:P4}，误报率: {evaluation.TestThresholdMetrics.FalsePositiveRate:P4}");
+        Console.WriteLine($"  OOF 训练 AUC: {evaluation.TrainAuc:P4}，AUC Gap: {evaluation.AucGap:P4}");
+        return result;
     }
 
     private void WriteProEvaluationReport(string modelPath, ProTrainingEvaluation evaluation)
@@ -249,7 +181,9 @@ public class ModelTrainer
             {
                 GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 ModelType = "Pro",
-                FeatureCount = evaluation.FeatureCount,
+                HybridFeatureCount = FeatureSchema.ProHybridFeatureCount,
+                FusionFeatureCount = evaluation.FeatureCount,
+                Architecture = "4x GBDT branches + OOF logistic regression fusion",
                 Samples = new
                 {
                     Total = evaluation.TotalSamples,
@@ -294,7 +228,7 @@ public class ModelTrainer
                     ProNumberOfIterations = _config.ProNumberOfIterations,
                     ProL1Regularization = _config.ProL1Regularization,
                     ProL2Regularization = _config.ProL2Regularization,
-                    ProLearner = _config.ProLearner
+                    Algorithm = _proLearner.Name
                 }
             };
 
@@ -311,14 +245,27 @@ public class ModelTrainer
 
     public void PredictPro(ITransformer model, FileData fileData)
     {
-        int featureCount = ProHybridFileFeatures.FeatureCount;
-        var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fileData.FilePath);
-        var schemaDef = SchemaDefinition.Create(typeof(ProBinaryTrainingData));
-        schemaDef["Features"].ColumnType = new VectorDataViewType(NumberDataViewType.Single, featureCount);
-        var predictionEngine = _mlContext.Model.CreatePredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>(model, inputSchemaDefinition: schemaDef);
-        var prediction = predictionEngine.Predict(new ProBinaryTrainingData(featureCount)
+        if (_lastProTrainingResult == null)
+            throw new InvalidOperationException("当前训练器中没有可用的 Pro Stacking 分支模型。");
+
+        float[] proFeatures = ProHybridFeatureExtractor.ExtractFeatures(fileData.FilePath).ToFloatArray();
+        var branchScores = new float[FeatureSchema.ProFusionFeatureCount];
+        foreach (var branch in _lastProTrainingResult.BranchModels)
         {
-            Features = proFeatures.ToFloatArray(),
+            using var engine = _mlContext.Model.CreatePredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>(
+                branch.Model,
+                inputSchemaDefinition: ProStackingTrainer.CreateSchema(branch.FeatureCount));
+            float[] branchFeatures = ProStackingTrainer.ExtractBranch(proFeatures, branch.Branch);
+            branchScores[(int)branch.Branch] = engine.Predict(new ProBinaryTrainingData(branch.FeatureCount)
+            {
+                Features = branchFeatures
+            }).Probability;
+        }
+
+        using var fusionEngine = _mlContext.Model.CreatePredictionEngine<ProFusionTrainingData, BinaryModelPrediction>(model);
+        var prediction = fusionEngine.Predict(new ProFusionTrainingData
+        {
+            Features = branchScores,
             Label = fileData.Label
         });
         PrintPrediction(fileData, prediction, _config.ProThreshold);
@@ -444,10 +391,13 @@ public class ModelTrainer
             NumberOfLeaves = _config.NumberOfLeaves,
             MinimumExampleCountPerLeaf = _config.MinimumExampleCountPerLeaf,
             NumberOfIterations = _config.NumberOfIterations,
+            Deterministic = true,
+            Seed = _config.RandomSeed,
             Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
             {
                 L1Regularization = _config.StandardL1Regularization,
-                L2Regularization = _config.StandardL2Regularization
+                L2Regularization = _config.StandardL2Regularization,
+                MaximumTreeDepth = _config.StandardMaximumTreeDepth
             }
         };
 
@@ -464,10 +414,13 @@ public class ModelTrainer
             NumberOfLeaves = _config.FlashNumberOfLeaves,
             MinimumExampleCountPerLeaf = _config.FlashMinimumExampleCountPerLeaf,
             NumberOfIterations = _config.FlashNumberOfIterations,
+            Deterministic = true,
+            Seed = _config.RandomSeed,
             Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
             {
                 L1Regularization = _config.FlashL1Regularization,
-                L2Regularization = _config.FlashL2Regularization
+                L2Regularization = _config.FlashL2Regularization,
+                MaximumTreeDepth = _config.FlashMaximumTreeDepth
             }
         };
 
@@ -496,7 +449,7 @@ public class ModelTrainer
         Console.WriteLine($"FP: {thresholdMetrics.FalsePositive}, TN: {thresholdMetrics.TrueNegative}");
     }
 
-    private static ThresholdMetrics ComputeThresholdMetrics(List<ThresholdEvaluationRow> rows, double threshold)
+    internal static ThresholdMetrics ComputeThresholdMetrics(List<ThresholdEvaluationRow> rows, double threshold)
     {
         long truePositive = 0;
         long falseNegative = 0;
@@ -534,7 +487,7 @@ public class ModelTrainer
             f1Score);
     }
 
-    private static (double threshold, ThresholdMetrics metrics) FindBestThreshold(List<ThresholdEvaluationRow> rows)
+    internal static (double threshold, ThresholdMetrics metrics) FindBestThreshold(List<ThresholdEvaluationRow> rows)
     {
         double bestThreshold = 50;
         ThresholdMetrics? bestMetrics = null;

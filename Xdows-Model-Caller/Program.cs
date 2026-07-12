@@ -12,7 +12,8 @@ internal class Program
     {
         Standard = 0,
         Flash = 1,
-        Pro = 2
+        Pro = 2,
+        Adaptive = 3
     }
 
     private enum XdowsModelNativeStatus
@@ -39,6 +40,10 @@ internal class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetConsoleOutputCP(uint wCodePageID);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetDllDirectory(string lpPathName);
 
     [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     private static extern int XdowsModelNativeInitialize(string modelDirectory, int mode, out IntPtr session);
@@ -69,6 +74,8 @@ internal class Program
         bool standardMode = false;
         bool flashMode = false;
         bool proMode = false;
+        bool adaptiveMode = false;
+        bool forceManaged = false;
         string filePath = string.Empty;
         string? modelPath = null;
 
@@ -86,6 +93,14 @@ internal class Program
             {
                 proMode = true;
             }
+            else if (args[i] == "-a")
+            {
+                adaptiveMode = true;
+            }
+            else if (args[i] == "-managed")
+            {
+                forceManaged = true;
+            }
             else if (string.IsNullOrEmpty(filePath))
             {
                 filePath = args[i];
@@ -96,23 +111,25 @@ internal class Program
             }
         }
 
-        int modeCount = (standardMode ? 1 : 0) + (flashMode ? 1 : 0) + (proMode ? 1 : 0);
+        int modeCount = (standardMode ? 1 : 0) + (flashMode ? 1 : 0) + (proMode ? 1 : 0) + (adaptiveMode ? 1 : 0);
         if (modeCount > 1)
         {
-            Console.WriteLine("错误：-s、-f 和 -p 参数互斥，不能同时指定。");
+            Console.WriteLine("错误：-s、-f、-p 和 -a 参数互斥，不能同时指定。");
             return;
         }
 
         if (string.IsNullOrEmpty(filePath))
         {
-            Console.WriteLine("用法: Xdows-Model-Caller.exe <文件路径> [模型路径] [-s] [-f] [-p]");
+            Console.WriteLine("用法: Xdows-Model-Caller.exe <文件路径> [模型路径] [-s] [-f] [-p] [-a]");
             Console.WriteLine();
             Console.WriteLine("选项:");
             Console.WriteLine("  -s    使用 Standard 模型");
             Console.WriteLine("  -f    使用 Flash 模型");
             Console.WriteLine("  -p    使用 Pro 模型");
+            Console.WriteLine("  -a    使用 Flash → Standard → Pro 自适应级联");
+            Console.WriteLine("  -managed  强制使用托管 ONNX 推理路径");
             Console.WriteLine();
-            Console.WriteLine("注意: -s、-f 和 -p 互斥，不能同时指定");
+            Console.WriteLine("注意: -s、-f、-p 和 -a 互斥，不能同时指定");
             Console.WriteLine("如果模型未指定，默认使用 Standard");
             return;
         }
@@ -123,19 +140,19 @@ internal class Program
             return;
         }
 
-        string modelName = proMode ? "Pro" : (flashMode ? "Flash" : "Standard");
+        string modelName = adaptiveMode ? "Adaptive" : (proMode ? "Pro" : (flashMode ? "Flash" : "Standard"));
         Console.WriteLine($"开始扫描：{filePath}");
         Console.WriteLine($"扫描模型：{modelName}");
         Console.WriteLine();
 
         string? nativeDllPath = FindNativeDll();
-        if (nativeDllPath != null && TryRunNative(nativeDllPath, filePath, modelPath, proMode, flashMode, out bool isVirus, out float probability))
+        if (!forceManaged && nativeDllPath != null && TryRunNative(nativeDllPath, filePath, modelPath, proMode, flashMode, adaptiveMode, out bool isVirus, out float probability))
         {
             PrintResult(isVirus, probability);
             return;
         }
 
-        RunManaged(filePath, modelPath, proMode, flashMode);
+        RunManaged(filePath, modelPath, proMode, flashMode, adaptiveMode);
     }
 
     private static string? FindNativeDll()
@@ -145,15 +162,27 @@ internal class Program
         if (File.Exists(candidate))
             return candidate;
 
-        string projectDir = Path.Combine(baseDir, "..", "..", "..", "..");
-        candidate = Path.GetFullPath(Path.Combine(projectDir, "Xdows-Model-Native", "x64", "Release", "Xdows-Model-Native.dll"));
-        if (File.Exists(candidate))
-            return candidate;
+        for (DirectoryInfo? directory = new(baseDir); directory != null; directory = directory.Parent)
+        {
+            if (!File.Exists(Path.Combine(directory.FullName, "Xdows-Model.slnx")))
+                continue;
+
+            foreach (string relativePath in new[]
+            {
+                Path.Combine("x64", "Release", "Xdows-Model-Native.dll"),
+                Path.Combine("Xdows-Model-Native", "x64", "Release", "Xdows-Model-Native.dll")
+            })
+            {
+                candidate = Path.Combine(directory.FullName, relativePath);
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+        }
 
         return null;
     }
 
-    private static bool TryRunNative(string nativeDllPath, string filePath, string? modelPath, bool proMode, bool flashMode, out bool isVirus, out float probability)
+    private static bool TryRunNative(string nativeDllPath, string filePath, string? modelPath, bool proMode, bool flashMode, bool adaptiveMode, out bool isVirus, out float probability)
     {
         isVirus = false;
         probability = 0f;
@@ -165,10 +194,16 @@ internal class Program
         if (!Directory.Exists(modelDirectory))
             return false;
 
-        var mode = proMode ? XdowsModelNativeMode.Pro : (flashMode ? XdowsModelNativeMode.Flash : XdowsModelNativeMode.Standard);
+        var mode = adaptiveMode
+            ? XdowsModelNativeMode.Adaptive
+            : (proMode ? XdowsModelNativeMode.Pro : (flashMode ? XdowsModelNativeMode.Flash : XdowsModelNativeMode.Standard));
 
         try
         {
+            string? nativeDirectory = Path.GetDirectoryName(nativeDllPath);
+            if (string.IsNullOrEmpty(nativeDirectory) || !SetDllDirectory(nativeDirectory))
+                return false;
+
             int initStatus = XdowsModelNativeInitialize(modelDirectory, (int)mode, out IntPtr session);
             if (initStatus != (int)XdowsModelNativeStatus.Ok || session == IntPtr.Zero)
                 return false;
@@ -179,7 +214,7 @@ internal class Program
                 if (scanStatus == (int)XdowsModelNativeStatus.Ok)
                 {
                     isVirus = result.IsThreat != 0;
-                    probability = result.Probability * 100f;
+                    probability = result.Probability;
 
                     if (result.DetectionName != IntPtr.Zero)
                         XdowsModelNativeFreeString(result.DetectionName);
@@ -215,11 +250,22 @@ internal class Program
         }
     }
 
-    private static void RunManaged(string filePath, string? modelPath, bool proMode, bool flashMode)
+    private static void RunManaged(string filePath, string? modelPath, bool proMode, bool flashMode, bool adaptiveMode)
     {
         try
         {
-            if (proMode)
+            if (adaptiveMode)
+            {
+                string? modelDirectory = string.IsNullOrWhiteSpace(modelPath)
+                    ? null
+                    : (Directory.Exists(modelPath) ? modelPath : Path.GetDirectoryName(modelPath));
+                using var adaptiveSession = ModelInvoker.CreateAdaptiveSession(modelDirectory, new TrainingConfig());
+                AdaptiveScanResult result = adaptiveSession.ScanFile(filePath);
+                Console.WriteLine($"最终判定层：{result.FinalMode}");
+                PrintResult(result.IsVirus, result.Probability);
+                return;
+            }
+            else if (proMode)
             {
                 if (!string.IsNullOrEmpty(modelPath))
                     Xdows_Model_Invoker.ModelInvoker.InitializePro(modelPath);

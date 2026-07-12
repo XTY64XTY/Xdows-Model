@@ -35,6 +35,14 @@
     <Content Include="Xdows-Model-Pro.onnx" Condition="Exists('Xdows-Model-Pro.onnx')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <EmbeddedResource Include="Xdows-Model-Pro-Standard.onnx" Condition="Exists('Xdows-Model-Pro-Standard.onnx')" />
+    <Content Include="Xdows-Model-Pro-Standard.onnx" Condition="Exists('Xdows-Model-Pro-Standard.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <EmbeddedResource Include="Xdows-Model-Pro-Flash.onnx" Condition="Exists('Xdows-Model-Pro-Flash.onnx')" />
+    <Content Include="Xdows-Model-Pro-Flash.onnx" Condition="Exists('Xdows-Model-Pro-Flash.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <EmbeddedResource Include="Xdows-Model-Pro-RawStat.onnx" Condition="Exists('Xdows-Model-Pro-RawStat.onnx')" />
+    <Content Include="Xdows-Model-Pro-RawStat.onnx" Condition="Exists('Xdows-Model-Pro-RawStat.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <EmbeddedResource Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')" />
+    <Content Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
   </ItemGroup>
 
 </Project>

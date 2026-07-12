@@ -17,6 +17,7 @@
 #include <fstream>
 #include <memory>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -75,6 +76,15 @@ namespace
         Ort::Env Env;
         Ort::SessionOptions Options;
         std::unique_ptr<Ort::Session> Session;
+        std::array<std::unique_ptr<Ort::Session>, 4> ProBranchSessions;
+        std::unique_ptr<NativeSession> AdaptiveFlash;
+        std::unique_ptr<NativeSession> AdaptiveStandard;
+        std::unique_ptr<NativeSession> AdaptivePro;
+        std::array<int, 4> ProBranchFeatureCounts{
+            kStandardFeatureCount,
+            kFlashFeatureCount,
+            kProRawStatFeatureCount,
+            kProStructuralFeatureCount };
 
         NativeSession(int mode, int featureCount, const std::filesystem::path& modelPath)
             : Mode(mode),
@@ -84,25 +94,67 @@ namespace
         {
             Options.SetIntraOpNumThreads(1);
             Options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
+
+            if (Mode == XdowsModelNativeModeAdaptive)
+            {
+                auto directory = ModelPath.parent_path();
+                AdaptiveFlash = std::make_unique<NativeSession>(
+                    XdowsModelNativeModeFlash,
+                    kFlashFeatureCount,
+                    directory / L"Xdows-Model-Flash.onnx");
+                AdaptiveStandard = std::make_unique<NativeSession>(
+                    XdowsModelNativeModeStandard,
+                    kStandardFeatureCount,
+                    directory / L"Xdows-Model.onnx");
+                AdaptivePro = std::make_unique<NativeSession>(
+                    XdowsModelNativeModePro,
+                    kProHybridFeatureCount,
+                    directory / L"Xdows-Model-Pro.onnx");
+                return;
+            }
+
             Session = std::make_unique<Ort::Session>(Env, ModelPath.c_str(), Options);
 
+            FeatureCount = ReadFeatureCount(*Session, FeatureCount);
+
+            if (Mode == XdowsModelNativeModePro && FeatureCount == 4)
+            {
+                const std::array<std::wstring, 4> suffixes{
+                    L"-Standard", L"-Flash", L"-RawStat", L"-Structural" };
+                for (size_t i = 0; i < suffixes.size(); i++)
+                {
+                    std::filesystem::path branchPath = AddSuffix(ModelPath, suffixes[i]);
+                    if (!std::filesystem::exists(branchPath))
+                        throw std::runtime_error("missing-pro-stacking-branch");
+                    ProBranchSessions[i] = std::make_unique<Ort::Session>(Env, branchPath.c_str(), Options);
+                    int actual = ReadFeatureCount(*ProBranchSessions[i], ProBranchFeatureCounts[i]);
+                    if (actual != ProBranchFeatureCounts[i])
+                        throw std::runtime_error("pro-stacking-branch-dimension-mismatch");
+                }
+            }
+        }
+
+        static int ReadFeatureCount(Ort::Session& session, int fallback)
+        {
             Ort::AllocatorWithDefaultOptions allocator;
-            size_t inputCount = Session->GetInputCount();
+            size_t inputCount = session.GetInputCount();
             for (size_t i = 0; i < inputCount; i++)
             {
-                auto inputName = Session->GetInputNameAllocated(i, allocator);
+                auto inputName = session.GetInputNameAllocated(i, allocator);
                 if (std::strcmp(inputName.get(), "Features") != 0)
                     continue;
-
-                Ort::TypeInfo typeInfo = Session->GetInputTypeInfo(i);
-                auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
-                auto shape = tensorInfo.GetShape();
+                auto shape = session.GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape();
                 if (shape.size() == 2 && shape[1] > 0)
-                    FeatureCount = static_cast<int>(shape[1]);
-                else if (shape.size() == 1 && shape[0] > 0)
-                    FeatureCount = static_cast<int>(shape[0]);
-                break;
+                    return static_cast<int>(shape[1]);
+                if (shape.size() == 1 && shape[0] > 0)
+                    return static_cast<int>(shape[0]);
             }
+            return fallback;
+        }
+
+        static std::filesystem::path AddSuffix(const std::filesystem::path& path, const std::wstring& suffix)
+        {
+            return path.parent_path() / (path.stem().wstring() + suffix + path.extension().wstring());
         }
     };
 
@@ -1034,7 +1086,7 @@ namespace
             return features.size() == kFlashFeatureCount;
         case XdowsModelNativeModePro:
         {
-            if (featureCount != kProHybridFeatureCount)
+            if (featureCount != kProHybridFeatureCount && featureCount != 4)
                 return false;
 
             AppendStandardFeatures(bytes, features);
@@ -1057,6 +1109,8 @@ namespace
             return kFlashFeatureCount;
         case XdowsModelNativeModePro:
             return kProHybridFeatureCount;
+        case XdowsModelNativeModeAdaptive:
+            return 0;
         default:
             return kStandardFeatureCount;
         }
@@ -1083,6 +1137,8 @@ namespace
             return L"Xdows-Model-Flash.onnx";
         case XdowsModelNativeModePro:
             return L"Xdows-Model-Pro.onnx";
+        case XdowsModelNativeModeAdaptive:
+            return L"Xdows-Model.onnx";
         default:
             return L"Xdows-Model.onnx";
         }
@@ -1096,6 +1152,8 @@ namespace
             return L"Flash";
         case XdowsModelNativeModePro:
             return L"Pro";
+        case XdowsModelNativeModeAdaptive:
+            return L"Adaptive";
         default:
             return L"Standard";
         }
@@ -1175,18 +1233,19 @@ namespace
         result->ErrorMessage = DuplicateString(message);
     }
 
-    bool RunOnnx(NativeSession* session, const std::vector<float>& features, float& probability, std::wstring& error)
+    bool RunOnnxSession(Ort::Session* session, int featureCount, const std::vector<float>& features,
+                        float& probability, std::wstring& error)
     {
         probability = 0;
         error.clear();
 
-        if (session == nullptr || session->Session == nullptr)
+        if (session == nullptr)
         {
             error = L"session-not-ready";
             return false;
         }
 
-        if (static_cast<int>(features.size()) != session->FeatureCount)
+        if (static_cast<int>(features.size()) != featureCount)
         {
             error = L"feature-count-mismatch";
             return false;
@@ -1216,7 +1275,7 @@ namespace
             const char* inputNames[] = { "Features", "Label" };
             const char* outputNames[] = { "Probability.output" };
             Ort::RunOptions runOptions;
-            auto outputs = session->Session->Run(
+            auto outputs = session->Run(
                 runOptions,
                 inputNames,
                 inputs.data(),
@@ -1247,6 +1306,85 @@ namespace
             return false;
         }
     }
+
+    bool RunOnnx(NativeSession* session, const std::vector<float>& features, float& probability, std::wstring& error)
+    {
+        if (session == nullptr || session->Session == nullptr)
+        {
+            error = L"session-not-ready";
+            return false;
+        }
+
+        if (session->Mode != XdowsModelNativeModePro || session->FeatureCount != 4)
+            return RunOnnxSession(session->Session.get(), session->FeatureCount, features, probability, error);
+
+        if (features.size() != static_cast<size_t>(kProHybridFeatureCount))
+        {
+            error = L"pro-hybrid-feature-count-mismatch";
+            return false;
+        }
+
+        const std::array<size_t, 4> offsets{
+            0,
+            kStandardFeatureCount,
+            kStandardFeatureCount + kFlashFeatureCount,
+            kStandardFeatureCount + kFlashFeatureCount + kProRawStatFeatureCount };
+        std::vector<float> fusionFeatures(4, 0.0f);
+        for (size_t i = 0; i < session->ProBranchSessions.size(); i++)
+        {
+            int count = session->ProBranchFeatureCounts[i];
+            std::vector<float> branchFeatures(
+                features.begin() + static_cast<std::ptrdiff_t>(offsets[i]),
+                features.begin() + static_cast<std::ptrdiff_t>(offsets[i] + count));
+            float branchProbability = 0;
+            if (!RunOnnxSession(session->ProBranchSessions[i].get(), count, branchFeatures, branchProbability, error))
+                return false;
+            fusionFeatures[i] = branchProbability / 100.0f;
+        }
+
+        return RunOnnxSession(session->Session.get(), 4, fusionFeatures, probability, error);
+    }
+
+    bool RunAdaptive(NativeSession* session, const std::vector<std::uint8_t>& bytes,
+                     float& probability, int& finalMode, std::wstring& error)
+    {
+        if (session == nullptr || session->AdaptiveFlash == nullptr ||
+            session->AdaptiveStandard == nullptr || session->AdaptivePro == nullptr)
+        {
+            error = L"adaptive-session-not-ready";
+            return false;
+        }
+
+        std::vector<float> features;
+        AppendFlashFeatures(bytes, features);
+        if (!RunOnnx(session->AdaptiveFlash.get(), features, probability, error))
+            return false;
+        if (probability <= 4.0f || probability >= 96.0f)
+        {
+            finalMode = XdowsModelNativeModeFlash;
+            return true;
+        }
+
+        features.clear();
+        AppendStandardFeatures(bytes, features);
+        if (!RunOnnx(session->AdaptiveStandard.get(), features, probability, error))
+            return false;
+        if (probability <= 8.0f || probability >= 92.0f)
+        {
+            finalMode = XdowsModelNativeModeStandard;
+            return true;
+        }
+
+        features.clear();
+        AppendStandardFeatures(bytes, features);
+        AppendFlashFeatures(bytes, features);
+        AppendProRawStatFeatures(bytes, features);
+        AppendProStructuralFeatures(bytes, features);
+        if (!RunOnnx(session->AdaptivePro.get(), features, probability, error))
+            return false;
+        finalMode = XdowsModelNativeModePro;
+        return true;
+    }
 }
 
 extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
@@ -1259,7 +1397,7 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
 
     *session = nullptr;
 
-    if (mode < XdowsModelNativeModeStandard || mode > XdowsModelNativeModePro)
+    if (mode < XdowsModelNativeModeStandard || mode > XdowsModelNativeModeAdaptive)
         return XdowsModelNativeStatusInvalidArgument;
 
     std::filesystem::path modelPath = ResolveModelPath(modelDirectory, mode);
@@ -1308,7 +1446,7 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeScanFile(
         result->Status = XdowsModelNativeStatusOk;
         result->IsThreat = 1;
         result->Probability = 100.0f;
-        result->DetectionName = DuplicateString(L"Xdows.Model.Native.EICAR");
+        result->DetectionName = DuplicateString(L"Xdows.Model.EICAR");
         return XdowsModelNativeStatusOk;
     }
 
@@ -1320,28 +1458,39 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeScanFile(
         return XdowsModelNativeStatusOk;
     }
 
-    std::vector<float> features;
-    if (!ExtractFeaturesForMode(nativeSession->Mode, nativeSession->FeatureCount, bytes, features))
-    {
-        SetError(result, XdowsModelNativeStatusUnsupportedFile, L"feature-extraction-failed");
-        return XdowsModelNativeStatusUnsupportedFile;
-    }
-
     float probability = 0;
+    int decisionMode = nativeSession->Mode;
     std::wstring error;
-    if (!RunOnnx(nativeSession, features, probability, error))
+    if (nativeSession->Mode == XdowsModelNativeModeAdaptive)
     {
-        SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error);
-        return XdowsModelNativeStatusInternalError;
+        if (!RunAdaptive(nativeSession, bytes, probability, decisionMode, error))
+        {
+            SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"adaptive-run-failed" : error);
+            return XdowsModelNativeStatusInternalError;
+        }
+    }
+    else
+    {
+        std::vector<float> features;
+        if (!ExtractFeaturesForMode(nativeSession->Mode, nativeSession->FeatureCount, bytes, features))
+        {
+            SetError(result, XdowsModelNativeStatusUnsupportedFile, L"feature-extraction-failed");
+            return XdowsModelNativeStatusUnsupportedFile;
+        }
+        if (!RunOnnx(nativeSession, features, probability, error))
+        {
+            SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error);
+            return XdowsModelNativeStatusInternalError;
+        }
     }
 
     result->Status = XdowsModelNativeStatusOk;
     result->Probability = probability;
-    if (probability >= ThresholdForMode(nativeSession->Mode))
+    if (probability >= ThresholdForMode(decisionMode))
     {
         result->IsThreat = 1;
         result->DetectionName = DuplicateString(
-            L"Xdows.Model.Native." + ModeName(nativeSession->Mode) + L".Probability" +
+            L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
             std::to_wstring(static_cast<int>(probability)));
     }
     else

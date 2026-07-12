@@ -23,6 +23,7 @@ namespace Xdows_Model_Invoker
         private static string? _loadedModelPath;
         private static ModelMode _mode = ModelMode.Standard;
         private static int? _proFeatureDimension;
+        private static ProEnsembleSession? _proEnsemble;
         private static float _standardThreshold = NormalizeThreshold((float)_defaultConfig.StandardThreshold);
         private static float _flashThreshold = NormalizeThreshold((float)_defaultConfig.FlashThreshold);
         private static float _proThreshold = NormalizeThreshold((float)_defaultConfig.ProThreshold);
@@ -87,7 +88,10 @@ namespace Xdows_Model_Invoker
 
             InitializeFlash(modelPath);
 
-            var features = FlashFeatureExtractor.ExtractFeatures(filePath);
+            byte[] bytes = File.ReadAllBytes(filePath);
+            if (!FeatureExtractor.IsPeFile(bytes))
+                throw new NotSupportedException("不支持该文件类型");
+            var features = FlashFeatureExtractor.ExtractFromBytes(bytes);
             return PredictWithInitializedModel(features.ToFloatArray());
         }
 
@@ -98,7 +102,10 @@ namespace Xdows_Model_Invoker
 
             InitializePro(modelPath);
 
-            var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(filePath);
+            byte[] bytes = File.ReadAllBytes(filePath);
+            if (!FeatureExtractor.IsPeFile(bytes))
+                throw new NotSupportedException("不支持该文件类型");
+            var proFeatures = ProHybridFeatureExtractor.ExtractFromBytes(bytes);
             return PredictWithInitializedModel(proFeatures.ToFloatArray());
         }
 
@@ -114,10 +121,9 @@ namespace Xdows_Model_Invoker
 
         public static void InitializePro(string? modelPath = null)
         {
-            InitializeCore(modelPath ?? EnsureModelAvailable(DefaultProModelFileName), ModelMode.Pro);
             try
             {
-                ValidateProFeatureDimension();
+                InitializeCore(modelPath ?? EnsureModelAvailable(DefaultProModelFileName), ModelMode.Pro);
             }
             catch
             {
@@ -134,6 +140,8 @@ namespace Xdows_Model_Invoker
                     return;
 
                 _session?.Dispose();
+                _proEnsemble?.Dispose();
+                _proEnsemble = null;
                 _session = new InferenceSession(path);
                 _loadedModelPath = path;
                 _mode = mode;
@@ -169,7 +177,8 @@ namespace Xdows_Model_Invoker
                     : dims.Length == 1 && dims[0] > 0 ? dims[0]
                     : -1;
 
-                if (actual > 0 && actual != expected)
+                bool validProDimension = mode == ModelMode.Pro && actual == FeatureSchema.ProFusionFeatureCount;
+                if (actual > 0 && actual != expected && !validProDimension)
                 {
                     throw new InvalidOperationException(
                         $"{mode} 模型特征维度不匹配：当前模型为 {actual} 维，期望 {expected} 维。");
@@ -206,6 +215,8 @@ namespace Xdows_Model_Invoker
             lock (_initLock)
             {
                 _session?.Dispose();
+                _proEnsemble?.Dispose();
+                _proEnsemble = null;
                 _session = null;
                 _loadedModelPath = null;
                 _mode = ModelMode.Standard;
@@ -252,6 +263,12 @@ namespace Xdows_Model_Invoker
                 _ => FeatureSchema.StandardFeatureCount
             };
 
+            if (_mode == ModelMode.Pro && _proEnsemble != null)
+            {
+                float probability = _proEnsemble.Predict(_session, features);
+                return (probability >= _proThreshold, probability);
+            }
+
             return RunInference(_session, features, featureCount, GetThreshold(_mode));
         }
 
@@ -263,24 +280,24 @@ namespace Xdows_Model_Invoker
             if (_session == null)
                 throw new InvalidOperationException("ModelInvoker 没有初始化");
 
+            byte[] bytes = File.ReadAllBytes(filePath);
+            if (!FeatureExtractor.IsPeFile(bytes))
+                throw new NotSupportedException("不支持该文件类型");
+
             float[] floatFeatures;
 
             switch (_mode)
             {
                 case ModelMode.Flash:
-                    var flashFeatures = FlashFeatureExtractor.ExtractFeatures(filePath);
+                    var flashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
                     floatFeatures = flashFeatures.ToFloatArray();
                     break;
                 case ModelMode.Pro:
-                    var proFeatures = ProHybridFeatureExtractor.ExtractFeatures(filePath);
+                    var proFeatures = ProHybridFeatureExtractor.ExtractFromBytes(bytes);
                     floatFeatures = proFeatures.ToFloatArray();
                     break;
                 default:
-                    var fileBytes = File.ReadAllBytes(filePath);
-                    if (!FeatureExtractor.IsPeFile(fileBytes))
-                        throw new NotSupportedException("不支持该文件类型");
-
-                    var features = FeatureExtractor.ExtractFromBytes(fileBytes);
+                    var features = FeatureExtractor.ExtractFromBytes(bytes);
                     floatFeatures = features.ToFloatArray();
                     break;
             }
@@ -291,6 +308,15 @@ namespace Xdows_Model_Invoker
         private static void ValidateProFeatureDimension()
         {
             int featureCount = GetProFeatureDimension();
+            if (featureCount == FeatureSchema.ProFusionFeatureCount)
+            {
+                if (string.IsNullOrEmpty(_loadedModelPath))
+                    throw new InvalidOperationException("Pro 融合模型路径不可用。");
+                _proEnsemble?.Dispose();
+                _proEnsemble = new ProEnsembleSession(_loadedModelPath);
+                return;
+            }
+
             if (featureCount != FeatureSchema.ProHybridFeatureCount)
             {
                 throw new InvalidOperationException(
@@ -298,7 +324,7 @@ namespace Xdows_Model_Invoker
             }
         }
 
-        private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features, int featureCount, float threshold)
+        internal static float RunProbability(InferenceSession session, float[] features, int featureCount)
         {
             var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, featureCount });
             var labelTensor = new DenseTensor<bool>(new Memory<bool>(new bool[] { false }), new[] { 1, 1 });
@@ -313,7 +339,6 @@ namespace Xdows_Model_Invoker
 
             var probabilityOutput = results.FirstOrDefault(r => r.Name == "Probability.output");
 
-            bool isVirus = false;
             float probability = 0f;
 
             if (probabilityOutput != null)
@@ -322,9 +347,33 @@ namespace Xdows_Model_Invoker
                 if (probResult.Length > 0) probability = probResult[0] * 100;
             }
 
-            isVirus = probability >= threshold;
+            return probability;
+        }
 
-            return (isVirus, probability);
+        private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features, int featureCount, float threshold)
+        {
+            float probability = RunProbability(session, features, featureCount);
+            return (probability >= threshold, probability);
+        }
+
+        public static AdaptiveModelSession CreateAdaptiveSession(string? modelDirectory = null, TrainingConfig? config = null)
+        {
+            string standardPath;
+            string flashPath;
+            string proPath;
+            if (string.IsNullOrWhiteSpace(modelDirectory))
+            {
+                standardPath = EnsureModelAvailable(DefaultModelFileName);
+                flashPath = EnsureModelAvailable(DefaultFlashModelFileName);
+                proPath = EnsureModelAvailable(DefaultProModelFileName);
+            }
+            else
+            {
+                standardPath = Path.Combine(modelDirectory, DefaultModelFileName);
+                flashPath = Path.Combine(modelDirectory, DefaultFlashModelFileName);
+                proPath = Path.Combine(modelDirectory, DefaultProModelFileName);
+            }
+            return new AdaptiveModelSession(flashPath, standardPath, proPath, config ?? new TrainingConfig());
         }
 
         private static float NormalizeThreshold(float threshold)

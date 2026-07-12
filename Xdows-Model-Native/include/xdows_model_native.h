@@ -13,7 +13,8 @@ extern "C" {
 typedef enum XDOWS_MODEL_NATIVE_MODE {
     XdowsModelNativeModeStandard = 0,
     XdowsModelNativeModeFlash = 1,
-    XdowsModelNativeModePro = 2
+    XdowsModelNativeModePro = 2,
+    XdowsModelNativeModeAdaptive = 3
 } XDOWS_MODEL_NATIVE_MODE;
 
 typedef enum XDOWS_MODEL_NATIVE_STATUS {

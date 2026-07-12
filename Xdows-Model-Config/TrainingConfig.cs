@@ -2,18 +2,23 @@ namespace Xdows_Model_Config;
 
 public static class FeatureSchema
 {
-    public const int Version = 1;
+    public const int Version = 2;
     public const int StandardFeatureCount = 299;
     public const int FlashFeatureCount = 68;
     public const int ProHybridFeatureCount = 519;
     public const int ProRawStatCount = 120;
     public const int ProStructuralCount = 32;
+    public const int ProFusionFeatureCount = 4;
+    public const int ProStandardOffset = 0;
+    public const int ProFlashOffset = ProStandardOffset + StandardFeatureCount;
+    public const int ProRawStatOffset = ProFlashOffset + FlashFeatureCount;
+    public const int ProStructuralOffset = ProRawStatOffset + ProRawStatCount;
 }
 
 public class TrainingConfig
 {
-    public string BlackFolder { get; set; } = string.Empty;
-    public string WhiteFolder { get; set; } = string.Empty;
+    public string BlackFolder { get; set; } = "D:\\Code\\Model\\Files\\Black";
+    public string WhiteFolder { get; set; } = "D:\\Code\\Model\\Files\\White";
     public string ModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model.zip");
     public string OnnxPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model.onnx");
     public string FlashModelPath { get; set; } = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Xdows-Model-Flash.zip");
@@ -31,6 +36,7 @@ public class TrainingConfig
     public int NumberOfIterations { get; set; } = 1024;
     public double StandardL1Regularization { get; set; } = 0.01;
     public double StandardL2Regularization { get; set; } = 0.1;
+    public int StandardMaximumTreeDepth { get; set; } = 8;
     public int? RandomSeed { get; set; } = 43846;
 
     public double FlashLearningRate { get; set; } = 0.1;
@@ -39,6 +45,7 @@ public class TrainingConfig
     public int FlashNumberOfIterations { get; set; } = 800;
     public double FlashL1Regularization { get; set; } = 0.01;
     public double FlashL2Regularization { get; set; } = 0.2;
+    public int FlashMaximumTreeDepth { get; set; } = 5;
 
     public double ProLearningRate { get; set; } = 0.01;
     public int ProNumberOfLeaves { get; set; } = 63;
@@ -46,7 +53,9 @@ public class TrainingConfig
     public int ProNumberOfIterations { get; set; } = 1200;
     public double ProL1Regularization { get; set; } = 0.01;
     public double ProL2Regularization { get; set; } = 0.1;
-    public string ProLearner { get; set; } = "LightGbm";
+    public int ProMaximumTreeDepth { get; set; } = 8;
+    public double ProFeatureFraction { get; set; } = 0.85;
+    public double ProSubsampleFraction { get; set; } = 0.8;
 
     public void PrintStandardConfig()
     {
@@ -57,6 +66,7 @@ public class TrainingConfig
         Console.WriteLine($"迭代次数 (Iterations): {NumberOfIterations}");
         Console.WriteLine($"L1 正则化: {StandardL1Regularization}");
         Console.WriteLine($"L2 正则化: {StandardL2Regularization}");
+        Console.WriteLine($"最大树深度: {StandardMaximumTreeDepth}");
         Console.WriteLine($"判毒阈值: {StandardThreshold}%");
         Console.WriteLine($"随机种子: {RandomSeed}");
         Console.WriteLine("========================\n");
@@ -71,6 +81,7 @@ public class TrainingConfig
         Console.WriteLine($"迭代次数 (Iterations): {FlashNumberOfIterations}");
         Console.WriteLine($"L1 正则化: {FlashL1Regularization}");
         Console.WriteLine($"L2 正则化: {FlashL2Regularization}");
+        Console.WriteLine($"最大树深度: {FlashMaximumTreeDepth}");
         Console.WriteLine($"判毒阈值: {FlashThreshold}%");
         Console.WriteLine("========================\n");
     }
@@ -78,13 +89,17 @@ public class TrainingConfig
     public void PrintProConfig()
     {
         Console.WriteLine("\n=== Pro 模型配置 ===");
-        Console.WriteLine($"Pro learner: {ProLearner}");
+        Console.WriteLine("训练算法: GBDT (LightGBM)");
+        Console.WriteLine("架构: Standard / Flash / RawStat / PE结构 四分支 + OOF逻辑回归融合");
         Console.WriteLine($"学习率 (Learning Rate): {ProLearningRate}");
         Console.WriteLine($"叶子数 (Number of Leaves): {ProNumberOfLeaves}");
         Console.WriteLine($"最小叶节点样本数: {ProMinimumExampleCountPerLeaf}");
         Console.WriteLine($"迭代次数 (Iterations): {ProNumberOfIterations}");
         Console.WriteLine($"L1 正则化: {ProL1Regularization}");
         Console.WriteLine($"L2 正则化: {ProL2Regularization}");
+        Console.WriteLine($"最大树深度: {ProMaximumTreeDepth}");
+        Console.WriteLine($"特征采样比例: {ProFeatureFraction}");
+        Console.WriteLine($"样本采样比例: {ProSubsampleFraction}");
         Console.WriteLine($"判毒阈值: {ProThreshold}%");
         Console.WriteLine($"Raw 统计特征: 3 段 × 40 维 = 120 维 (固定)");
         Console.WriteLine($"总特征维度: 519 (299 + 68 + 120 + 32)");
