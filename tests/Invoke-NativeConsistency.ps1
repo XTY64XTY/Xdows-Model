@@ -176,6 +176,7 @@ public static class XdowsModelNativeProbe
             if (![string]::IsNullOrWhiteSpace($ModeFlag)) {
                 $arguments += $ModeFlag
             }
+            $arguments += "-managed"
 
             $output = & $callerExe @arguments 2>&1 | Out-String
             if ($output -match "(Safe|Virus)\(([0-9]+(?:\.[0-9]+)?)%\)") {
@@ -255,7 +256,8 @@ public static class XdowsModelNativeProbe
         foreach ($mode in @(
             @{ Name = "Standard"; Flag = "-s" },
             @{ Name = "Flash"; Flag = "-f" },
-            @{ Name = "Pro"; Flag = "-p" }
+            @{ Name = "Pro"; Flag = "-p" },
+            @{ Name = "Adaptive"; Flag = "-a" }
         )) {
             $result = Invoke-ManagedScan -Sample $sample -ModeName $mode.Name -ModeFlag $mode.Flag
             [pscustomobject]@{
@@ -280,7 +282,8 @@ public static class XdowsModelNativeProbe
         $modes = @(
             @{ Name = "Standard"; NativeMode = 0; Flag = "-s" },
             @{ Name = "Flash"; NativeMode = 1; Flag = "-f" },
-            @{ Name = "Pro"; NativeMode = 2; Flag = "-p" }
+            @{ Name = "Pro"; NativeMode = 2; Flag = "-p" },
+            @{ Name = "Adaptive"; NativeMode = 3; Flag = "-a" }
         )
 
         $nativeResults = foreach ($mode in $modes) {

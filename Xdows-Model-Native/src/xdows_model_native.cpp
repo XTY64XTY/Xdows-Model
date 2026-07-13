@@ -1355,29 +1355,30 @@ namespace
             return false;
         }
 
-        std::vector<float> features;
-        AppendFlashFeatures(bytes, features);
-        if (!RunOnnx(session->AdaptiveFlash.get(), features, probability, error))
+        std::vector<float> flashFeatures;
+        AppendFlashFeatures(bytes, flashFeatures);
+        if (!RunOnnx(session->AdaptiveFlash.get(), flashFeatures, probability, error))
             return false;
-        if (probability <= 4.0f || probability >= 96.0f)
+        if (probability <= 100.0f - ThresholdForMode(XdowsModelNativeModeFlash))
         {
             finalMode = XdowsModelNativeModeFlash;
             return true;
         }
 
-        features.clear();
-        AppendStandardFeatures(bytes, features);
-        if (!RunOnnx(session->AdaptiveStandard.get(), features, probability, error))
+        std::vector<float> standardFeatures;
+        AppendStandardFeatures(bytes, standardFeatures);
+        if (!RunOnnx(session->AdaptiveStandard.get(), standardFeatures, probability, error))
             return false;
-        if (probability <= 8.0f || probability >= 92.0f)
+        if (probability <= 100.0f - ThresholdForMode(XdowsModelNativeModeStandard))
         {
             finalMode = XdowsModelNativeModeStandard;
             return true;
         }
 
-        features.clear();
-        AppendStandardFeatures(bytes, features);
-        AppendFlashFeatures(bytes, features);
+        std::vector<float> features;
+        features.reserve(kProHybridFeatureCount);
+        features.insert(features.end(), standardFeatures.begin(), standardFeatures.end());
+        features.insert(features.end(), flashFeatures.begin(), flashFeatures.end());
         AppendProRawStatFeatures(bytes, features);
         AppendProStructuralFeatures(bytes, features);
         if (!RunOnnx(session->AdaptivePro.get(), features, probability, error))

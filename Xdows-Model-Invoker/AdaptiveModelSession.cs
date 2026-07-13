@@ -37,35 +37,39 @@ public sealed class AdaptiveModelSession : IDisposable
         if (!FeatureExtractor.IsPeFile(bytes))
             throw new NotSupportedException("不支持该文件类型");
 
+        float[] flashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray();
         float flashProbability = ModelInvoker.RunProbability(
             _flashSession,
-            FlashFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(),
+            flashFeatures,
             FeatureSchema.FlashFeatureCount);
-        if (IsConfident(flashProbability, _config.FlashThreshold))
-            return CreateResult(flashProbability, _config.FlashThreshold, ModelMode.Flash);
+        var flashDecision = AdaptiveDecisionPolicy.EvaluateIntermediate(flashProbability, _config.FlashThreshold);
+        if (flashDecision != AdaptiveIntermediateDecision.Escalate)
+            return CreateSafeResult(flashProbability, ModelMode.Flash);
 
+        float[] standardFeatures = FeatureExtractor.ExtractFromBytes(bytes).ToFloatArray();
         float standardProbability = ModelInvoker.RunProbability(
             _standardSession,
-            FeatureExtractor.ExtractFromBytes(bytes).ToFloatArray(),
+            standardFeatures,
             FeatureSchema.StandardFeatureCount);
-        if (IsConfident(standardProbability, _config.StandardThreshold))
-            return CreateResult(standardProbability, _config.StandardThreshold, ModelMode.Standard);
+        var standardDecision = AdaptiveDecisionPolicy.EvaluateIntermediate(standardProbability, _config.StandardThreshold);
+        if (standardDecision != AdaptiveIntermediateDecision.Escalate)
+            return CreateSafeResult(standardProbability, ModelMode.Standard);
 
-        float[] proFeatures = ProHybridFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray();
+        float[] proFeatures = AdaptiveFeatureComposer.ComposePro(bytes, standardFeatures, flashFeatures);
         float proProbability = _proEnsemble != null
             ? _proEnsemble.Predict(_proSession, proFeatures)
             : ModelInvoker.RunProbability(_proSession, proFeatures, FeatureSchema.ProHybridFeatureCount);
         return CreateResult(proProbability, _config.ProThreshold, ModelMode.Pro);
     }
 
-    private static bool IsConfident(float probability, double threatThreshold)
-    {
-        return probability <= 100.0 - threatThreshold || probability >= threatThreshold;
-    }
-
     private static AdaptiveScanResult CreateResult(float probability, double threshold, ModelMode mode)
     {
         return new AdaptiveScanResult(probability >= threshold, probability, mode);
+    }
+
+    private static AdaptiveScanResult CreateSafeResult(float probability, ModelMode mode)
+    {
+        return new AdaptiveScanResult(false, probability, mode);
     }
 
     private static void ValidateDimension(InferenceSession session, int expected, string name)
