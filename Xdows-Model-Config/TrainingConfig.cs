@@ -30,13 +30,16 @@ public class TrainingConfig
     public double FlashThreshold { get; set; } = 96.0;
     public double ProThreshold { get; set; } = 94.0;
 
-    public double LearningRate { get; set; } = 0.005;
-    public int NumberOfLeaves { get; set; } = 63;
-    public int MinimumExampleCountPerLeaf { get; set; } = 31;
-    public int NumberOfIterations { get; set; } = 1024;
-    public double StandardL1Regularization { get; set; } = 0.01;
-    public double StandardL2Regularization { get; set; } = 0.1;
-    public int StandardMaximumTreeDepth { get; set; } = 8;
+    public double LearningRate { get; set; } = 0.025;
+    public int NumberOfLeaves { get; set; } = 127;
+    public int MinimumExampleCountPerLeaf { get; set; } = 16;
+    public int NumberOfIterations { get; set; } = 1400;
+    public double StandardL1Regularization { get; set; } = 0.02;
+    public double StandardL2Regularization { get; set; } = 0.4;
+    public int StandardMaximumTreeDepth { get; set; } = 10;
+    public double StandardFeatureFraction { get; set; } = 0.9;
+    public double StandardSubsampleFraction { get; set; } = 0.85;
+    public double StandardTargetFalsePositiveRate { get; set; } = 0.005;
     public int? RandomSeed { get; set; } = 43846;
 
     public double FlashLearningRate { get; set; } = 0.1;
@@ -67,6 +70,9 @@ public class TrainingConfig
         Console.WriteLine($"L1 正则化: {StandardL1Regularization}");
         Console.WriteLine($"L2 正则化: {StandardL2Regularization}");
         Console.WriteLine($"最大树深度: {StandardMaximumTreeDepth}");
+        Console.WriteLine($"特征采样比例: {StandardFeatureFraction}");
+        Console.WriteLine($"样本采样比例: {StandardSubsampleFraction}");
+        Console.WriteLine($"阈值校准目标 FPR: {StandardTargetFalsePositiveRate:P2}");
         Console.WriteLine($"判毒阈值: {StandardThreshold}%");
         Console.WriteLine($"随机种子: {RandomSeed}");
         Console.WriteLine("========================\n");

@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\Xdows-Model-Invoker\Xdows-Model-Invoker.csproj" />
+    <ProjectReference Include="..\..\Xdows-Model-Maker\Xdows-Model-Maker.csproj" />
   </ItemGroup>
 </Project>

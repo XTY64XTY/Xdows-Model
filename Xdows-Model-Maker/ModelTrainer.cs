@@ -318,6 +318,7 @@ public class ModelTrainer
 
         IDataView fullDataView;
         string labelColumnName;
+        List<BinaryTrainingData>? standardRows = null;
 
         if (flash)
         {
@@ -331,30 +332,57 @@ public class ModelTrainer
         }
         else
         {
-            var trainingData = validData.Select(fd => new BinaryTrainingData
+            standardRows = validData.Select(fd => new BinaryTrainingData
             {
                 Features = fd.Features.ToFloatArray(),
                 Label = fd.Label
             }).ToList();
-            fullDataView = _mlContext.Data.LoadFromEnumerable(trainingData);
+            fullDataView = _mlContext.Data.LoadFromEnumerable(standardRows);
             labelColumnName = nameof(BinaryTrainingData.Label);
         }
 
-        var trainTestSplit = _mlContext.Data.TrainTestSplit(fullDataView, testFraction: 0.2);
-        var trainData = trainTestSplit.TrainSet;
-        var testData = trainTestSplit.TestSet;
+        IDataView trainData;
+        IDataView testData;
+        if (flash)
+        {
+            var trainTestSplit = _mlContext.Data.TrainTestSplit(fullDataView, testFraction: 0.2);
+            trainData = trainTestSplit.TrainSet;
+            testData = trainTestSplit.TestSet;
+        }
+        else
+        {
+            var split = StandardTrainingPolicy.CreateStratifiedHoldout(
+                standardRows!,
+                testFraction: 0.2,
+                _config.RandomSeed ?? 43846);
+            trainData = _mlContext.Data.LoadFromEnumerable(split.Train);
+            testData = _mlContext.Data.LoadFromEnumerable(split.Test);
+            Console.WriteLine($"Standard 分层切分：训练 {split.Train.Count}，测试 {split.Test.Count}");
+        }
 
         var pipeline = flash ? BuildFlashPipeline(labelColumnName) : BuildPipeline(labelColumnName);
 
         Console.WriteLine($"正在训练{modeLabel}LightGBM 模型...");
-        var model = pipeline.Fit(trainData);
+        var evaluationModel = pipeline.Fit(trainData);
 
         Console.WriteLine($"正在评估{modeLabel}模型...");
         double threshold = flash ? _config.FlashThreshold : _config.StandardThreshold;
-        EvaluateModel(model, testData, labelColumnName, threshold);
+        EvaluateModel(
+            evaluationModel,
+            testData,
+            labelColumnName,
+            threshold,
+            flash ? null : _config.StandardTargetFalsePositiveRate);
+
+        ITransformer model = evaluationModel;
+        if (!flash)
+        {
+            Console.WriteLine("正在使用全部有效样本重训最终 Standard 模型...");
+            model = pipeline.Fit(fullDataView);
+        }
 
         Console.WriteLine($"正在保存{modeLabel}ML.NET 模型到：{modelPath}");
-        _mlContext.Model.Save(model, trainData.Schema, modelPath);
+        _mlContext.Model.Save(model, fullDataView.Schema, modelPath);
         Console.WriteLine($"{modeLabel}ML.NET 模型保存成功!");
 
         if (!string.IsNullOrEmpty(onnxPath))
@@ -397,7 +425,10 @@ public class ModelTrainer
             {
                 L1Regularization = _config.StandardL1Regularization,
                 L2Regularization = _config.StandardL2Regularization,
-                MaximumTreeDepth = _config.StandardMaximumTreeDepth
+                MaximumTreeDepth = _config.StandardMaximumTreeDepth,
+                FeatureFraction = _config.StandardFeatureFraction,
+                SubsampleFraction = _config.StandardSubsampleFraction,
+                SubsampleFrequency = 1
             }
         };
 
@@ -427,7 +458,12 @@ public class ModelTrainer
         return _mlContext.BinaryClassification.Trainers.LightGbm(options);
     }
 
-    private void EvaluateModel(ITransformer model, IDataView testData, string labelColumnName, double threshold)
+    private void EvaluateModel(
+        ITransformer model,
+        IDataView testData,
+        string labelColumnName,
+        double threshold,
+        double? maximumFalsePositiveRate = null)
     {
         var predictions = model.Transform(testData);
 
@@ -447,6 +483,17 @@ public class ModelTrainer
         Console.WriteLine("\n混淆矩阵:");
         Console.WriteLine($"TP: {thresholdMetrics.TruePositive}, FN: {thresholdMetrics.FalseNegative}");
         Console.WriteLine($"FP: {thresholdMetrics.FalsePositive}, TN: {thresholdMetrics.TrueNegative}");
+
+        if (maximumFalsePositiveRate.HasValue)
+        {
+            var constrained = StandardTrainingPolicy.FindThresholdAtMaximumFalsePositiveRate(
+                rows,
+                maximumFalsePositiveRate.Value);
+            Console.WriteLine($"\n低误报校准（FPR <= {maximumFalsePositiveRate.Value:P2}）:");
+            Console.WriteLine($"推荐阈值: {constrained.Threshold:F1}%");
+            Console.WriteLine($"检出率 (TPR): {constrained.Metrics.TruePositiveRate:P4}");
+            Console.WriteLine($"误报率 (FPR): {constrained.Metrics.FalsePositiveRate:P4}");
+        }
     }
 
     internal static ThresholdMetrics ComputeThresholdMetrics(List<ThresholdEvaluationRow> rows, double threshold)

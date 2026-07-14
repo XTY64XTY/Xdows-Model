@@ -80,13 +80,21 @@ public class DataLoader
 
         _loadingStopwatch = Stopwatch.StartNew();
 
-        var tasks = new Task[files.Length];
-        for (int i = 0; i < files.Length; i++)
+        if (enableParallelLoading)
         {
-            tasks[i] = ProcessSingleFileAsync(files[i], isBlack, results, totalFiles);
+            await Parallel.ForEachAsync(
+                files,
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount)
+                },
+                async (file, _) => await ProcessSingleFileAsync(file, isBlack, results, totalFiles));
         }
-
-        await Task.WhenAll(tasks);
+        else
+        {
+            foreach (string file in files)
+                await ProcessSingleFileAsync(file, isBlack, results, totalFiles);
+        }
 
         _loadingStopwatch.Stop();
         double filesPerSecond = totalFiles * 1000.0 / _loadingStopwatch.ElapsedMilliseconds;
