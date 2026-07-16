@@ -1,358 +1,317 @@
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-using System.Text;
 using Xdows_Model_Config;
 using Xdows_Model_Invoker;
 
 namespace Xdows_Model_Caller;
 
-internal class Program
+internal static class Program
 {
-    private enum XdowsModelNativeMode
+    private enum CallerMode
     {
-        Standard = 0,
-        Flash = 1,
-        Pro = 2,
-        Adaptive = 3
+        Standard,
+        Flash,
+        Pro,
+        Adaptive
     }
 
-    private enum XdowsModelNativeStatus
+    private sealed record CallerOptions(CallerMode Mode, string? ModelPath);
+
+    private interface IScanEngine : IDisposable
     {
-        Ok = 0,
-        InvalidArgument = 1,
-        FileNotFound = 2,
-        UnsupportedFile = 3,
-        ModelNotFound = 4,
-        InternalError = 5
+        CallerMode Mode { get; }
+
+        void Initialize();
+
+        ScanResult Scan(string filePath);
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct XdowsModelNativeScanResult
-    {
-        public int Size;
-        public int Status;
-        public int IsThreat;
-        public float Probability;
-        public IntPtr DetectionName;
-        public IntPtr ErrorMessage;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetConsoleOutputCP(uint wCodePageID);
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetDllDirectory(string lpPathName);
-
-    [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
-    private static extern int XdowsModelNativeInitialize(string modelDirectory, int mode, out IntPtr session);
-
-    [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
-    private static extern int XdowsModelNativeScanFile(IntPtr session, string filePath, out XdowsModelNativeScanResult result);
-
-    [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall)]
-    private static extern void XdowsModelNativeShutdown(IntPtr session);
-
-    [DllImport("Xdows-Model-Native.dll", CallingConvention = CallingConvention.StdCall)]
-    private static extern void XdowsModelNativeFreeString(IntPtr value);
+    private readonly record struct ScanResult(bool IsThreat, float Probability);
 
     private static void Main(string[] args)
     {
-        SetConsoleOutputCP(65001);
-        Console.OutputEncoding = Encoding.UTF8;
+        PrintBanner();
 
-        if (args.Length > 0 && args[0] == "-benchmark")
+        if (args.Any(IsHelpArgument))
         {
-            RunBenchmark(args);
+            PrintUsage();
             return;
         }
 
-        Console.WriteLine("Xdows Model 调用器 By Shiyi");
-        Console.WriteLine();
-
-        bool standardMode = false;
-        bool flashMode = false;
-        bool proMode = false;
-        bool adaptiveMode = false;
-        bool forceManaged = false;
-        string filePath = string.Empty;
-        string? modelPath = null;
-
-        for (int i = 0; i < args.Length; i++)
+        if (!TryParseOptions(args, out CallerOptions options, out string? error))
         {
-            if (args[i] == "-s")
-            {
-                standardMode = true;
-            }
-            else if (args[i] == "-f")
-            {
-                flashMode = true;
-            }
-            else if (args[i] == "-p")
-            {
-                proMode = true;
-            }
-            else if (args[i] == "-a")
-            {
-                adaptiveMode = true;
-            }
-            else if (args[i] == "-managed")
-            {
-                forceManaged = true;
-            }
-            else if (string.IsNullOrEmpty(filePath))
-            {
-                filePath = args[i];
-            }
-            else if (string.IsNullOrEmpty(modelPath))
-            {
-                modelPath = args[i];
-            }
-        }
-
-        int modeCount = (standardMode ? 1 : 0) + (flashMode ? 1 : 0) + (proMode ? 1 : 0) + (adaptiveMode ? 1 : 0);
-        if (modeCount > 1)
-        {
-            Console.WriteLine("错误：-s、-f、-p 和 -a 参数互斥，不能同时指定。");
-            return;
-        }
-
-        if (string.IsNullOrEmpty(filePath))
-        {
-            Console.WriteLine("用法: Xdows-Model-Caller.exe <文件路径> [模型路径] [-s] [-f] [-p] [-a]");
+            Console.WriteLine($"参数错误：{error}");
             Console.WriteLine();
-            Console.WriteLine("选项:");
-            Console.WriteLine("  -s    使用 Standard 模型");
-            Console.WriteLine("  -f    使用 Flash 模型");
-            Console.WriteLine("  -p    使用 Pro 模型");
-            Console.WriteLine("  -a    使用 Flash → Standard → Pro 自适应级联");
-            Console.WriteLine("  -managed  强制使用托管 ONNX 推理路径");
-            Console.WriteLine();
-            Console.WriteLine("注意: -s、-f、-p 和 -a 互斥，不能同时指定");
-            Console.WriteLine("如果模型未指定，默认使用 Standard");
+            PrintUsage();
             return;
         }
-
-        if (!File.Exists(filePath))
-        {
-            Console.WriteLine($"错误：文件不存在：{filePath}");
-            return;
-        }
-
-        string modelName = adaptiveMode ? "Adaptive" : (proMode ? "Pro" : (flashMode ? "Flash" : "Standard"));
-        Console.WriteLine($"开始扫描：{filePath}");
-        Console.WriteLine($"扫描模型：{modelName}");
-        Console.WriteLine();
-
-        string? nativeDllPath = FindNativeDll();
-        if (!forceManaged && nativeDllPath != null && TryRunNative(nativeDllPath, filePath, modelPath, proMode, flashMode, adaptiveMode, out bool isVirus, out float probability))
-        {
-            PrintResult(isVirus, probability);
-            return;
-        }
-
-        RunManaged(filePath, modelPath, proMode, flashMode, adaptiveMode);
-    }
-
-    private static string? FindNativeDll()
-    {
-        string baseDir = AppContext.BaseDirectory;
-        string candidate = Path.Combine(baseDir, "Xdows-Model-Native.dll");
-        if (File.Exists(candidate))
-            return candidate;
-
-        for (DirectoryInfo? directory = new(baseDir); directory != null; directory = directory.Parent)
-        {
-            if (!File.Exists(Path.Combine(directory.FullName, "Xdows-Model.slnx")))
-                continue;
-
-            foreach (string relativePath in new[]
-            {
-                Path.Combine("x64", "Release", "Xdows-Model-Native.dll"),
-                Path.Combine("Xdows-Model-Native", "x64", "Release", "Xdows-Model-Native.dll")
-            })
-            {
-                candidate = Path.Combine(directory.FullName, relativePath);
-                if (File.Exists(candidate))
-                    return candidate;
-            }
-        }
-
-        return null;
-    }
-
-    private static bool TryRunNative(string nativeDllPath, string filePath, string? modelPath, bool proMode, bool flashMode, bool adaptiveMode, out bool isVirus, out float probability)
-    {
-        isVirus = false;
-        probability = 0f;
-
-        string modelDirectory = !string.IsNullOrEmpty(modelPath)
-            ? Path.GetDirectoryName(modelPath) ?? AppContext.BaseDirectory
-            : AppContext.BaseDirectory;
-
-        if (!Directory.Exists(modelDirectory))
-            return false;
-
-        var mode = adaptiveMode
-            ? XdowsModelNativeMode.Adaptive
-            : (proMode ? XdowsModelNativeMode.Pro : (flashMode ? XdowsModelNativeMode.Flash : XdowsModelNativeMode.Standard));
 
         try
         {
-            string? nativeDirectory = Path.GetDirectoryName(nativeDllPath);
-            if (string.IsNullOrEmpty(nativeDirectory) || !SetDllDirectory(nativeDirectory))
-                return false;
+            using IScanEngine engine = CreateEngine(options);
+            Console.WriteLine($"正在初始化 {engine.Mode} 模型...");
+            engine.Initialize();
+            Console.WriteLine($"{engine.Mode} 模型初始化完成。");
+            Console.WriteLine();
 
-            int initStatus = XdowsModelNativeInitialize(modelDirectory, (int)mode, out IntPtr session);
-            if (initStatus != (int)XdowsModelNativeStatus.Ok || session == IntPtr.Zero)
-                return false;
-
-            try
-            {
-                int scanStatus = XdowsModelNativeScanFile(session, filePath, out XdowsModelNativeScanResult result);
-                if (scanStatus == (int)XdowsModelNativeStatus.Ok)
-                {
-                    isVirus = result.IsThreat != 0;
-                    probability = result.Probability;
-
-                    if (result.DetectionName != IntPtr.Zero)
-                        XdowsModelNativeFreeString(result.DetectionName);
-                    if (result.ErrorMessage != IntPtr.Zero)
-                        XdowsModelNativeFreeString(result.ErrorMessage);
-
-                    return true;
-                }
-
-                if (result.ErrorMessage != IntPtr.Zero)
-                    XdowsModelNativeFreeString(result.ErrorMessage);
-                if (result.DetectionName != IntPtr.Zero)
-                    XdowsModelNativeFreeString(result.DetectionName);
-
-                return false;
-            }
-            finally
-            {
-                XdowsModelNativeShutdown(session);
-            }
-        }
-        catch (DllNotFoundException)
-        {
-            return false;
-        }
-        catch (BadImageFormatException)
-        {
-            return false;
-        }
-        catch (EntryPointNotFoundException)
-        {
-            return false;
-        }
-    }
-
-    private static void RunManaged(string filePath, string? modelPath, bool proMode, bool flashMode, bool adaptiveMode)
-    {
-        try
-        {
-            if (adaptiveMode)
-            {
-                string? modelDirectory = string.IsNullOrWhiteSpace(modelPath)
-                    ? null
-                    : (Directory.Exists(modelPath) ? modelPath : Path.GetDirectoryName(modelPath));
-                using var adaptiveSession = ModelInvoker.CreateAdaptiveSession(modelDirectory, new TrainingConfig());
-                AdaptiveScanResult result = adaptiveSession.ScanFile(filePath);
-                Console.WriteLine($"最终判定层：{result.FinalMode}");
-                PrintResult(result.IsVirus, result.Probability);
-                return;
-            }
-            else if (proMode)
-            {
-                if (!string.IsNullOrEmpty(modelPath))
-                    Xdows_Model_Invoker.ModelInvoker.InitializePro(modelPath);
-                else
-                    Xdows_Model_Invoker.ModelInvoker.InitializePro();
-            }
-            else if (flashMode)
-            {
-                if (!string.IsNullOrEmpty(modelPath))
-                    Xdows_Model_Invoker.ModelInvoker.InitializeFlash(modelPath);
-                else
-                    Xdows_Model_Invoker.ModelInvoker.InitializeFlash();
-            }
-            else
-            {
-                if (!string.IsNullOrEmpty(modelPath))
-                    Xdows_Model_Invoker.ModelInvoker.Initialize(modelPath);
-                else
-                    Xdows_Model_Invoker.ModelInvoker.Initialize();
-            }
-
-            Xdows_Model_Invoker.ModelInvoker.ConfigureThresholds(new TrainingConfig());
-
-            var (isVirus, probability) = Xdows_Model_Invoker.ModelInvoker.ScanFile(filePath);
-            PrintResult(isVirus, probability);
+            RunInputLoop(engine);
         }
         catch (Exception ex)
         {
-            Console.WriteLine("错误：" + ex.Message);
-        }
-        finally
-        {
-            Xdows_Model_Invoker.ModelInvoker.UnloadModel();
+            Console.WriteLine($"模型返回：Error(初始化模型过程中发生错误：{ToSingleLine(ex.Message)})");
         }
     }
 
-    private static void PrintResult(bool isVirus, float probability)
+    private static void PrintBanner()
     {
-        if (!isVirus)
-        {
-            Console.WriteLine($"Safe({probability:F2}%)");
-        }
-        else
-        {
-            Console.WriteLine($"Virus({probability:F2}%)");
-        }
-    }
-
-    private static void RunBenchmark(string[] args)
-    {
-        int iterations = 100;
-        string filePath = args.Length > 1 ? args[1] : string.Empty;
-        if (args.Length > 2 && int.TryParse(args[2], out int it))
-            iterations = it;
-
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
-        {
-            Console.WriteLine("用法: -benchmark <文件路径> [迭代次数]");
-            return;
-        }
-
-        byte[] bytes = File.ReadAllBytes(filePath);
-        Console.WriteLine($"Benchmark: {filePath}");
-        Console.WriteLine($"FileSize: {bytes.Length:N0} bytes");
-        Console.WriteLine($"Iterations: {iterations}");
+        Console.WriteLine("Xdows Model 调用器 By Shiyi");
+        Console.WriteLine("输入 Help 以获取帮助");
         Console.WriteLine();
+    }
 
-        _ = FeatureExtractor.ExtractFromBytes(bytes);
-        _ = FlashFeatureExtractor.ExtractFromBytes(bytes);
-        _ = ProHybridFeatureExtractor.ExtractFromBytes(bytes);
+    private static void RunInputLoop(IScanEngine engine)
+    {
+        while (true)
+        {
+            Console.Write("输入操作：");
+            string? input = Console.ReadLine();
+            if (input is null)
+                return;
 
-        var sw = Stopwatch.StartNew();
-        for (int i = 0; i < iterations; i++)
-            _ = FeatureExtractor.ExtractFromBytes(bytes);
-        sw.Stop();
-        Console.WriteLine($"Standard: {sw.Elapsed.TotalMilliseconds / iterations:F4} ms/iter");
+            string filePath = Unquote(input.Trim());
+            if (IsHelpCommand(filePath))
+            {
+                Console.WriteLine();
+                PrintUsage();
+                Console.WriteLine();
+                continue;
+            }
 
-        sw.Restart();
-        for (int i = 0; i < iterations; i++)
-            _ = FlashFeatureExtractor.ExtractFromBytes(bytes);
-        sw.Stop();
-        Console.WriteLine($"Flash:    {sw.Elapsed.TotalMilliseconds / iterations:F4} ms/iter");
+            if (IsQuitCommand(filePath))
+                return;
+            Console.WriteLine($"扫描模式：{engine.Mode}");
 
-        sw.Restart();
-        for (int i = 0; i < iterations; i++)
-            _ = ProHybridFeatureExtractor.ExtractFromBytes(bytes);
-        sw.Stop();
-        Console.WriteLine($"Pro:      {sw.Elapsed.TotalMilliseconds / iterations:F4} ms/iter");
+            if (filePath.Length == 0)
+            {
+                Console.WriteLine("模型返回：Error(文件名没有被指定)\n");
+                continue;
+            }
+
+            try
+            {
+                if (!File.Exists(filePath))
+                {
+                    Console.WriteLine($"模型返回：Error(找不到指定文件：{filePath})\n");
+                    continue;
+                }
+
+                ScanResult result = engine.Scan(filePath);
+                string verdict = result.IsThreat ? "Virus" : "Safe";
+                Console.WriteLine($"模型返回：{verdict}({result.Probability:F2}%)\n");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"模型返回：Error({ToSingleLine(ex.Message)})\n");
+            }
+        }
+    }
+
+    private static IScanEngine CreateEngine(CallerOptions options) =>
+        options.Mode switch
+        {
+            CallerMode.Standard => new SingleModelScanEngine(CallerMode.Standard, ModelInvoker.Initialize, options.ModelPath),
+            CallerMode.Flash => new SingleModelScanEngine(CallerMode.Flash, ModelInvoker.InitializeFlash, options.ModelPath),
+            CallerMode.Pro => new SingleModelScanEngine(CallerMode.Pro, ModelInvoker.InitializePro, options.ModelPath),
+            CallerMode.Adaptive => new AdaptiveScanEngine(options.ModelPath),
+            _ => throw new ArgumentOutOfRangeException(nameof(options.Mode), options.Mode, "不支持的模型模式。")
+        };
+
+    private sealed class SingleModelScanEngine : IScanEngine
+    {
+        private readonly Action<string?> _initialize;
+        private readonly string? _modelPath;
+        private bool _initialized;
+
+        public SingleModelScanEngine(CallerMode mode, Action<string?> initialize, string? modelPath)
+        {
+            Mode = mode;
+            _initialize = initialize;
+            _modelPath = modelPath;
+        }
+
+        public CallerMode Mode { get; }
+
+        public void Initialize()
+        {
+            _initialize(_modelPath);
+            ModelInvoker.ConfigureThresholds(new TrainingConfig());
+            _initialized = true;
+        }
+
+        public ScanResult Scan(string filePath)
+        {
+            if (!_initialized)
+                throw new InvalidOperationException($"{Mode} 模型尚未初始化。");
+
+            var (isThreat, probability) = ModelInvoker.ScanFile(filePath);
+            return new ScanResult(isThreat, probability);
+        }
+
+        public void Dispose()
+        {
+            if (_initialized)
+                ModelInvoker.UnloadModel();
+        }
+    }
+
+    private sealed class AdaptiveScanEngine : IScanEngine
+    {
+        private readonly string? _modelDirectory;
+        private AdaptiveModelSession? _session;
+
+        public AdaptiveScanEngine(string? modelPath)
+        {
+            _modelDirectory = ResolveModelDirectory(modelPath);
+        }
+
+        public CallerMode Mode => CallerMode.Adaptive;
+
+        public void Initialize()
+        {
+            _session = ModelInvoker.CreateAdaptiveSession(_modelDirectory, new TrainingConfig());
+        }
+
+        public ScanResult Scan(string filePath)
+        {
+            AdaptiveModelSession session = _session ??
+                throw new InvalidOperationException("Adaptive 模型尚未初始化。");
+            AdaptiveScanResult result = session.ScanFile(filePath);
+            return new ScanResult(result.IsVirus, result.Probability);
+        }
+
+        public void Dispose() => _session?.Dispose();
+    }
+
+    private static string? ResolveModelDirectory(string? modelPath)
+    {
+        if (string.IsNullOrWhiteSpace(modelPath))
+            return null;
+        return Directory.Exists(modelPath) ? modelPath : Path.GetDirectoryName(modelPath);
+    }
+
+    private static bool TryParseOptions(
+        string[] args,
+        out CallerOptions options,
+        out string? error)
+    {
+        CallerMode mode = CallerMode.Standard;
+        bool modeSpecified = false;
+        string? modelPath = null;
+
+        for (int index = 0; index < args.Length; index++)
+        {
+            string argument = args[index];
+            if (TryParseMode(argument, out CallerMode parsedMode))
+            {
+                if (modeSpecified)
+                {
+                    options = null!;
+                    error = "-s、-f、-p 和 -a 只能指定一个。";
+                    return false;
+                }
+
+                mode = parsedMode;
+                modeSpecified = true;
+                continue;
+            }
+
+            if (string.Equals(argument, "--model", StringComparison.OrdinalIgnoreCase))
+            {
+                if (++index >= args.Length)
+                {
+                    options = null!;
+                    error = "--model 后缺少模型路径。";
+                    return false;
+                }
+
+                modelPath = Unquote(args[index]);
+                continue;
+            }
+
+            options = null!;
+            error = $"无法识别参数：{argument}";
+            return false;
+        }
+
+        options = new CallerOptions(mode, modelPath);
+        error = null;
+        return true;
+    }
+
+    private static bool TryParseMode(string argument, out CallerMode mode)
+    {
+        mode = argument.ToLowerInvariant() switch
+        {
+            "-s" => CallerMode.Standard,
+            "-f" => CallerMode.Flash,
+            "-p" => CallerMode.Pro,
+            "-a" => CallerMode.Adaptive,
+            _ => (CallerMode)(-1)
+        };
+        return Enum.IsDefined(mode);
+    }
+
+    private static bool IsHelpArgument(string argument) =>
+        argument.Equals("-h", StringComparison.OrdinalIgnoreCase) ||
+        argument.Equals("--help", StringComparison.OrdinalIgnoreCase) ||
+        argument.Equals("/?", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsHelpCommand(string input) =>
+        input.Equals("Help", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsQuitCommand(string input) =>
+        input.Equals("Quit", StringComparison.OrdinalIgnoreCase);
+
+    private static string Unquote(string value)
+    {
+        string trimmed = value.Trim();
+        if (trimmed.Length >= 2 &&
+            ((trimmed[0] == '"' && trimmed[^1] == '"') ||
+             (trimmed[0] == '\'' && trimmed[^1] == '\'')))
+        {
+            return trimmed[1..^1];
+        }
+
+        return trimmed;
+    }
+
+    private static string ToSingleLine(string message) =>
+        message.Replace('\r', ' ').Replace('\n', ' ');
+
+    private static void PrintUsage()
+    {
+        Console.WriteLine("帮助菜单");
+        Console.WriteLine();
+        Console.WriteLine("用法：");
+        Console.WriteLine("  Xdows-Model-Caller.exe [-s|-f|-p|-a] [--model <模型路径>]");
+        Console.WriteLine();
+        Console.WriteLine("模型模式：");
+        Console.WriteLine("  -s                  Standard 模式（默认）");
+        Console.WriteLine("  -f                  Flash 模式");
+        Console.WriteLine("  -p                  Pro 模式");
+        Console.WriteLine("  -a                  Adaptive 模式");
+        Console.WriteLine();
+        Console.WriteLine("其他选项：");
+        Console.WriteLine("  --model <路径>      指定模型文件；Adaptive 模式可指定模型目录");
+        Console.WriteLine("  -h, --help, /?      显示此帮助菜单");
+        Console.WriteLine();
+        Console.WriteLine("交互说明：");
+        Console.WriteLine("  模型初始化后可连续输入需要扫描的文件名。");
+        Console.WriteLine("  带空格的文件名可以使用单引号或双引号包裹。");
+        Console.WriteLine("  输入 Help 可显示此帮助菜单。");
+        Console.WriteLine("  输入 Quit 可关闭调用器。");
+        Console.WriteLine();
+        Console.WriteLine("示例：");
+        Console.WriteLine("  Xdows-Model-Caller.exe");
+        Console.WriteLine("  Xdows-Model-Caller.exe -p");
+        Console.WriteLine("  Xdows-Model-Caller.exe -a --model \"D:\\Models\"");
     }
 }

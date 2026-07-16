@@ -7,9 +7,10 @@ namespace Xdows_Model_Invoker
 {
     public enum ModelMode
     {
-        Standard,
-        Flash,
-        Pro
+        Standard = 0,
+        Flash = 1,
+        Pro = 2,
+        Adaptive = 3
     }
 
     public static class ModelInvoker
@@ -24,6 +25,7 @@ namespace Xdows_Model_Invoker
         private static ModelMode _mode = ModelMode.Standard;
         private static int? _proFeatureDimension;
         private static ProEnsembleSession? _proEnsemble;
+        private static AdaptiveModelSession? _adaptiveSession;
         private static float _standardThreshold = NormalizeThreshold((float)_defaultConfig.StandardThreshold);
         private static float _flashThreshold = NormalizeThreshold((float)_defaultConfig.FlashThreshold);
         private static float _proThreshold = NormalizeThreshold((float)_defaultConfig.ProThreshold);
@@ -132,6 +134,48 @@ namespace Xdows_Model_Invoker
             }
         }
 
+        public static void InitializeAdaptive(string? modelDirectory = null)
+        {
+            string directoryKey = string.IsNullOrWhiteSpace(modelDirectory)
+                ? string.Empty
+                : Path.GetFullPath(modelDirectory);
+
+            lock (_initLock)
+            {
+                if (_adaptiveSession != null &&
+                    _mode == ModelMode.Adaptive &&
+                    string.Equals(_loadedModelPath, directoryKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            try
+            {
+                AdaptiveModelSession adaptiveSession = CreateAdaptiveSession(
+                    directoryKey.Length == 0 ? null : directoryKey,
+                    _defaultConfig);
+
+                lock (_initLock)
+                {
+                    _session?.Dispose();
+                    _proEnsemble?.Dispose();
+                    _adaptiveSession?.Dispose();
+                    _session = null;
+                    _proEnsemble = null;
+                    _adaptiveSession = adaptiveSession;
+                    _loadedModelPath = directoryKey;
+                    _mode = ModelMode.Adaptive;
+                    _proFeatureDimension = null;
+                }
+            }
+            catch
+            {
+                UnloadModel();
+                throw;
+            }
+        }
+
         private static void InitializeCore(string path, ModelMode mode)
         {
             lock (_initLock)
@@ -141,7 +185,9 @@ namespace Xdows_Model_Invoker
 
                 _session?.Dispose();
                 _proEnsemble?.Dispose();
+                _adaptiveSession?.Dispose();
                 _proEnsemble = null;
+                _adaptiveSession = null;
                 _session = new InferenceSession(path);
                 _loadedModelPath = path;
                 _mode = mode;
@@ -186,18 +232,26 @@ namespace Xdows_Model_Invoker
             }
         }
 
-        public static bool IsInitialized => _session != null;
+        public static bool IsInitialized => _session != null || _adaptiveSession != null;
         public static bool IsFlashMode => _mode == ModelMode.Flash;
         public static bool IsProMode => _mode == ModelMode.Pro;
+        public static bool IsAdaptiveMode => _mode == ModelMode.Adaptive;
         public static ModelMode CurrentMode => _mode;
 
         public static void ConfigureThresholds(TrainingConfig config)
         {
             ArgumentNullException.ThrowIfNull(config);
 
-            _standardThreshold = NormalizeThreshold((float)config.StandardThreshold);
-            _flashThreshold = NormalizeThreshold((float)config.FlashThreshold);
-            _proThreshold = NormalizeThreshold((float)config.ProThreshold);
+            float standardThreshold = NormalizeThreshold((float)config.StandardThreshold);
+            float flashThreshold = NormalizeThreshold((float)config.FlashThreshold);
+            float proThreshold = NormalizeThreshold((float)config.ProThreshold);
+
+            _standardThreshold = standardThreshold;
+            _flashThreshold = flashThreshold;
+            _proThreshold = proThreshold;
+            _defaultConfig.StandardThreshold = standardThreshold;
+            _defaultConfig.FlashThreshold = flashThreshold;
+            _defaultConfig.ProThreshold = proThreshold;
         }
 
         public static float GetThreshold(ModelMode mode)
@@ -206,6 +260,7 @@ namespace Xdows_Model_Invoker
             {
                 ModelMode.Flash => _flashThreshold,
                 ModelMode.Pro => _proThreshold,
+                ModelMode.Adaptive => _proThreshold,
                 _ => _standardThreshold
             };
         }
@@ -216,7 +271,9 @@ namespace Xdows_Model_Invoker
             {
                 _session?.Dispose();
                 _proEnsemble?.Dispose();
+                _adaptiveSession?.Dispose();
                 _proEnsemble = null;
+                _adaptiveSession = null;
                 _session = null;
                 _loadedModelPath = null;
                 _mode = ModelMode.Standard;
@@ -276,6 +333,14 @@ namespace Xdows_Model_Invoker
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("找不到指定文件", filePath);
+
+            if (_mode == ModelMode.Adaptive)
+            {
+                AdaptiveModelSession adaptiveSession = _adaptiveSession ??
+                    throw new InvalidOperationException("ModelInvoker 没有初始化");
+                AdaptiveScanResult result = adaptiveSession.ScanFile(filePath);
+                return (result.IsVirus, result.Probability);
+            }
 
             if (_session == null)
                 throw new InvalidOperationException("ModelInvoker 没有初始化");

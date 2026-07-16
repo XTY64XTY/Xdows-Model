@@ -172,13 +172,11 @@ public static class XdowsModelNativeProbe
         $callerDir = Split-Path -Parent $callerExe
         Push-Location $callerDir
         try {
-            $arguments = @($Sample)
+            $arguments = @()
             if (![string]::IsNullOrWhiteSpace($ModeFlag)) {
                 $arguments += $ModeFlag
             }
-            $arguments += "-managed"
-
-            $output = & $callerExe @arguments 2>&1 | Out-String
+            $output = @($Sample, "QUIT") | & $callerExe @arguments 2>&1 | Out-String
             if ($output -match "(Safe|Virus)\(([0-9]+(?:\.[0-9]+)?)%\)") {
                 [pscustomobject]@{
                     Success = $true

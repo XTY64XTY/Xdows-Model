@@ -1,6 +1,7 @@
 using Xdows_Model_Invoker;
 using Xdows_Model_Maker;
 
+AssertModelModeContract();
 AssertDecision(1, 96, AdaptiveIntermediateDecision.FinalSafe, "Flash high-confidence safe exit");
 AssertDecision(4, 96, AdaptiveIntermediateDecision.FinalSafe, "Flash safe-exit boundary");
 AssertDecision(4.0001f, 96, AdaptiveIntermediateDecision.Escalate, "Flash value above safe-exit boundary");
@@ -10,7 +11,9 @@ AssertDecision(8, 92, AdaptiveIntermediateDecision.FinalSafe, "Standard safe-exi
 AssertDecision(8.0001f, 92, AdaptiveIntermediateDecision.Escalate, "Standard value above safe-exit boundary");
 AssertDecision(99, 92, AdaptiveIntermediateDecision.Escalate, "Standard suspicious result must reach Pro");
 
-byte[] peBytes = File.ReadAllBytes(Path.Combine(Environment.SystemDirectory, "notepad.exe"));
+string peSamplePath = Path.Combine(Environment.SystemDirectory, "notepad.exe");
+AssertAdaptiveInvoker(peSamplePath);
+byte[] peBytes = File.ReadAllBytes(peSamplePath);
 float[] standardFeatures = FeatureExtractor.ExtractFromBytes(peBytes).ToFloatArray();
 float[] flashFeatures = FlashFeatureExtractor.ExtractFromBytes(peBytes).ToFloatArray();
 float[] composed = AdaptiveFeatureComposer.ComposePro(peBytes, standardFeatures, flashFeatures);
@@ -28,6 +31,43 @@ Console.WriteLine("PASS: Adaptive intermediate stages cannot create a positive v
 AssertStandardThresholdSelection();
 AssertStandardStratifiedSplit();
 Console.WriteLine("PASS: Standard training policy preserves class balance and optimizes recall under an FPR cap.");
+
+static void AssertModelModeContract()
+{
+    if ((int)ModelMode.Standard != 0 ||
+        (int)ModelMode.Flash != 1 ||
+        (int)ModelMode.Pro != 2 ||
+        (int)ModelMode.Adaptive != 3)
+    {
+        throw new InvalidOperationException("Model mode values no longer match the native ABI contract.");
+    }
+
+    Console.WriteLine("PASS: Adaptive model mode matches the native ABI contract.");
+}
+
+static void AssertAdaptiveInvoker(string samplePath)
+{
+    ModelInvoker.InitializeAdaptive();
+    try
+    {
+        if (!ModelInvoker.IsInitialized ||
+            !ModelInvoker.IsAdaptiveMode ||
+            ModelInvoker.CurrentMode != ModelMode.Adaptive)
+        {
+            throw new InvalidOperationException("ModelInvoker did not enter Adaptive mode.");
+        }
+
+        var (_, probability) = ModelInvoker.ScanFile(samplePath);
+        if (!float.IsFinite(probability) || probability < 0 || probability > 100)
+            throw new InvalidOperationException($"Adaptive probability is invalid: {probability}.");
+    }
+    finally
+    {
+        ModelInvoker.UnloadModel();
+    }
+
+    Console.WriteLine("PASS: ModelInvoker initializes and scans through Adaptive mode.");
+}
 
 static void AssertDecision(float probability, double threshold, AdaptiveIntermediateDecision expected, string scenario)
 {
