@@ -9,7 +9,12 @@ internal static class TrainingDatasetReporter
         if (data.Count == 0)
             return;
 
-        int blackCount = data.Count(d => d.Label);
+        int blackCount = 0;
+        foreach (FileData sample in data)
+        {
+            if (sample.Label)
+                blackCount++;
+        }
         int whiteCount = data.Count - blackCount;
 
         Console.WriteLine("\n=== 训练数据基线报告 ===");
@@ -17,8 +22,20 @@ internal static class TrainingDatasetReporter
         Console.WriteLine($"黑样本: {blackCount} ({Ratio(blackCount, data.Count):P2})");
         Console.WriteLine($"白样本: {whiteCount} ({Ratio(whiteCount, data.Count):P2})");
 
-        PrintDistribution("文件修改年份分布", data.Select(d => TryGetLastWriteYear(d.FilePath)));
-        var peTimestampYears = data.Select(d => TryGetPeTimestampYear(d.FilePath)).ToList();
+        var lastWriteYears = new int?[data.Count];
+        var peTimestampYearArray = new int?[data.Count];
+        Parallel.For(0, data.Count, new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount)
+        }, index =>
+        {
+            string path = data[index].FilePath;
+            lastWriteYears[index] = TryGetLastWriteYear(path);
+            peTimestampYearArray[index] = TryGetPeTimestampYear(path);
+        });
+        var peTimestampYears = new List<int?>(peTimestampYearArray);
+
+        PrintDistribution("文件修改年份分布", lastWriteYears);
         PrintDistribution("PE 时间戳年份分布", peTimestampYears);
         PrintOldSampleWarning(peTimestampYears);
         Console.WriteLine("========================\n");
@@ -46,11 +63,20 @@ internal static class TrainingDatasetReporter
 
     private static void PrintOldSampleWarning(IReadOnlyList<int?> peTimestampYears)
     {
-        int knownCount = peTimestampYears.Count(y => y.HasValue);
+        int knownCount = 0;
+        int year2020Count = 0;
+        foreach (int? year in peTimestampYears)
+        {
+            if (!year.HasValue)
+                continue;
+            knownCount++;
+            if (year.Value == 2020)
+                year2020Count++;
+        }
+
         if (knownCount == 0)
             return;
 
-        int year2020Count = peTimestampYears.Count(y => y == 2020);
         double ratio = Ratio(year2020Count, knownCount);
         if (ratio >= 0.1)
         {

@@ -7,7 +7,7 @@ internal sealed class ProGbdtLearner
 {
     public string Name => "GBDT (LightGBM)";
 
-    public IEstimator<ITransformer> BuildPipeline(MLContext mlContext, TrainingConfig config)
+    public IEstimator<ITransformer> BuildPipeline(MLContext mlContext, TrainingConfig config, int? numberOfThreads = null)
     {
         var options = new Microsoft.ML.Trainers.LightGbm.LightGbmBinaryTrainer.Options
         {
@@ -17,6 +17,7 @@ internal sealed class ProGbdtLearner
             NumberOfLeaves = config.ProNumberOfLeaves,
             MinimumExampleCountPerLeaf = config.ProMinimumExampleCountPerLeaf,
             NumberOfIterations = config.ProNumberOfIterations,
+            NumberOfThreads = numberOfThreads,
             Deterministic = true,
             Seed = config.RandomSeed,
             Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options

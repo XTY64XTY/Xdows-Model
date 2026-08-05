@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using Xdows_Model_Config;
 using Xdows_Model_Invoker;
@@ -73,7 +72,7 @@ public class DataLoader
 
     private static async Task<List<FileData>> LoadFilesParallelAsync(string[] files, bool isBlack, bool enableParallelLoading)
     {
-        var results = new ConcurrentBag<FileData>();
+        var results = new FileData?[files.Length];
         int totalFiles = files.Length;
 
         Console.WriteLine($"文件总数：{files.Length}");
@@ -83,27 +82,33 @@ public class DataLoader
         if (enableParallelLoading)
         {
             await Parallel.ForEachAsync(
-                files,
+                Enumerable.Range(0, files.Length),
                 new ParallelOptions
                 {
                     MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount)
                 },
-                async (file, _) => await ProcessSingleFileAsync(file, isBlack, results, totalFiles));
+                async (index, _) => await ProcessSingleFileAsync(files[index], index, isBlack, results, totalFiles));
         }
         else
         {
-            foreach (string file in files)
-                await ProcessSingleFileAsync(file, isBlack, results, totalFiles);
+            for (int index = 0; index < files.Length; index++)
+                await ProcessSingleFileAsync(files[index], index, isBlack, results, totalFiles);
         }
 
         _loadingStopwatch.Stop();
         double filesPerSecond = totalFiles * 1000.0 / _loadingStopwatch.ElapsedMilliseconds;
         Console.WriteLine($"\n并行加载耗时: {_loadingStopwatch.ElapsedMilliseconds} ms ({filesPerSecond:F2} 文件/秒)");
 
-        return [.. results];
+        var loaded = new List<FileData>(results.Length);
+        foreach (FileData? fileData in results)
+        {
+            if (fileData is not null)
+                loaded.Add(fileData);
+        }
+        return loaded;
     }
 
-    private static async Task ProcessSingleFileAsync(string file, bool isBlack, ConcurrentBag<FileData> results, int totalFiles)
+    private static async Task ProcessSingleFileAsync(string file, int index, bool isBlack, FileData?[] results, int totalFiles)
     {
         try
         {
@@ -116,6 +121,11 @@ public class DataLoader
             switch (_currentMode)
             {
                 case DataLoadMode.ProOnly:
+                    {
+                        var bytes = await File.ReadAllBytesAsync(file);
+                        fileData.ProFeaturesAttempted = true;
+                        fileData.ProFeatures = ProHybridFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray();
+                    }
                     break;
                 case DataLoadMode.FlashOnly:
                     {
@@ -134,26 +144,57 @@ public class DataLoader
                     {
                         var bytes = await File.ReadAllBytesAsync(file);
                         fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
-                        try { fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes); }
-                        catch (NotSupportedException) { fileData.FlashFeatures = new FlashFileFeatures(); }
+                        bool flashFeaturesAvailable = true;
+                        try
+                        {
+                            fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
+                        }
+                        catch (NotSupportedException)
+                        {
+                            flashFeaturesAvailable = false;
+                            fileData.FlashFeatures = new FlashFileFeatures();
+                        }
+
+                        if (_currentMode == DataLoadMode.All)
+                        {
+                            fileData.ProFeaturesAttempted = true;
+                            if (flashFeaturesAvailable)
+                            {
+                                try
+                                {
+                                    fileData.ProFeatures = AdaptiveFeatureComposer.ComposePro(
+                                        bytes,
+                                        fileData.Features.ToFloatArray(),
+                                        fileData.FlashFeatures.ToFloatArray());
+                                }
+                                catch
+                                {
+                                    fileData.ProFeatures = null;
+                                }
+                            }
+                        }
                     }
                     break;
             }
 
-            results.Add(fileData);
+            results[index] = fileData;
 
-            lock (_lockObject)
+            int loadedCount = Interlocked.Increment(ref _loadedCount);
+            int progressInterval = Math.Max(100, totalFiles / 100);
+            if (loadedCount % progressInterval == 0 || loadedCount == totalFiles)
             {
-                _loadedCount++;
-                string label = isBlack ? "黑文件" : "白文件";
-                Console.Write($"\r已加载{label} ({_loadedCount}/{totalFiles})");
+                lock (_lockObject)
+                {
+                    string label = isBlack ? "黑文件" : "白文件";
+                    Console.Write($"\r已加载{label} ({loadedCount}/{totalFiles})");
+                }
             }
         }
         catch (Exception ex)
         {
+            Interlocked.Increment(ref _failedCount);
             lock (_lockObject)
             {
-                _failedCount++;
                 Console.WriteLine($"\n加载失败 {Path.GetFileName(file)}: {ex.Message}");
             }
         }

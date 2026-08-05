@@ -61,16 +61,20 @@ internal sealed class ProStackingTrainingResult
 
 internal sealed class ProStackingTrainer
 {
+    private static readonly ProBranch[] Branches = Enum.GetValues<ProBranch>();
     private const int RequestedFoldCount = 5;
+    private const int MinimumSamplesForParallelBranches = 4_096;
     private readonly MLContext _mlContext;
     private readonly TrainingConfig _config;
     private readonly ProGbdtLearner _branchLearner;
+    private readonly int _maxParallelBranchCount;
 
     public ProStackingTrainer(MLContext mlContext, TrainingConfig config, ProGbdtLearner branchLearner)
     {
         _mlContext = mlContext;
         _config = config;
         _branchLearner = branchLearner;
+        _maxParallelBranchCount = Math.Clamp(config.ProMaxParallelBranches, 1, Branches.Length);
     }
 
     public ProStackingTrainingResult Train(IReadOnlyList<ProStackingSample> samples)
@@ -82,6 +86,14 @@ internal sealed class ProStackingTrainer
             throw new InvalidOperationException("Pro Stacking 至少需要每类 3 个有效样本。");
 
         Console.WriteLine($"  Pro 架构：4 路 GBDT + Logistic Regression 融合，OOF={foldCount} 折");
+        int parallelBranchCount = samples.Count >= MinimumSamplesForParallelBranches
+            ? _maxParallelBranchCount
+            : 1;
+        int? threadsPerBranch = parallelBranchCount == 1
+            ? null
+            : Math.Max(1, Environment.ProcessorCount / parallelBranchCount);
+        string threadBudget = threadsPerBranch?.ToString() ?? "自动";
+        Console.WriteLine($"  Pro 并行度：{parallelBranchCount} 个分支，LightGBM 每分支线程：{threadBudget}");
         var folds = CreateStratifiedFolds(samples, trainIndices, foldCount, (_config.RandomSeed ?? 43846) + 1);
         var oofRows = new List<ProFusionTrainingData>(trainIndices.Length);
 
@@ -89,17 +101,8 @@ internal sealed class ProStackingTrainer
         {
             var validationSet = folds[fold].ToHashSet();
             var foldTraining = trainIndices.Where(i => !validationSet.Contains(i)).ToArray();
-            var branchModels = TrainBranches(samples, foldTraining);
-            using var engines = new BranchPredictionEngines(_mlContext, branchModels);
-
-            foreach (int index in folds[fold])
-            {
-                oofRows.Add(new ProFusionTrainingData
-                {
-                    Features = engines.Predict(samples[index].Features),
-                    Label = samples[index].Label
-                });
-            }
+            var branchModels = TrainBranches(samples, foldTraining, parallelBranchCount, threadsPerBranch);
+            oofRows.AddRange(ScoreSamples(samples, folds[fold], branchModels));
             Console.WriteLine($"  OOF 进度：{fold + 1}/{folds.Count}");
         }
 
@@ -109,24 +112,23 @@ internal sealed class ProStackingTrainer
             featureColumnName: nameof(ProFusionTrainingData.Features));
         ITransformer fusionModel = fusionPipeline.Fit(fusionTrainingData);
 
-        var finalBranches = TrainBranches(samples, trainIndices);
-        List<ProFusionTrainingData> testRows;
-        using (var engines = new BranchPredictionEngines(_mlContext, finalBranches))
-        {
-            testRows = testIndices.Select(index => new ProFusionTrainingData
-            {
-                Features = engines.Predict(samples[index].Features),
-                Label = samples[index].Label
-            }).ToList();
-        }
+        var finalBranches = TrainBranches(samples, trainIndices, parallelBranchCount, threadsPerBranch);
+        List<ProFusionTrainingData> testRows = ScoreSamples(samples, testIndices, finalBranches);
 
         IDataView testData = _mlContext.Data.LoadFromEnumerable(testRows);
         var testPredictions = fusionModel.Transform(testData);
         var testMetrics = _mlContext.BinaryClassification.Evaluate(testPredictions);
         var thresholdRows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(testPredictions, false).ToList();
         var trainMetrics = _mlContext.BinaryClassification.Evaluate(fusionModel.Transform(fusionTrainingData));
-        var thresholdMetrics = ModelTrainer.ComputeThresholdMetrics(thresholdRows, _config.ProThreshold);
-        var (bestThreshold, bestMetrics) = ModelTrainer.FindBestThreshold(thresholdRows);
+        var thresholdSweep = new ThresholdSweep(thresholdRows);
+        var thresholdMetrics = thresholdSweep.Compute(_config.ProThreshold);
+        var (bestThreshold, bestMetrics) = ModelTrainer.FindBestThreshold(thresholdSweep);
+        int blackSampleCount = 0;
+        foreach (var sample in samples)
+        {
+            if (sample.Label)
+                blackSampleCount++;
+        }
 
         return new ProStackingTrainingResult
         {
@@ -142,27 +144,88 @@ internal sealed class ProStackingTrainer
                 bestMetrics,
                 bestThreshold,
                 samples.Count,
-                samples.Count(s => s.Label),
-                samples.Count(s => !s.Label),
+                blackSampleCount,
+                samples.Count - blackSampleCount,
                 FeatureSchema.ProFusionFeatureCount)
         };
     }
 
-    private IReadOnlyList<ProBranchModel> TrainBranches(IReadOnlyList<ProStackingSample> samples, IReadOnlyList<int> indices)
+    internal List<ProFusionTrainingData> ScoreSamples(
+        IReadOnlyList<ProStackingSample> samples,
+        IReadOnlyList<int> indices,
+        IReadOnlyList<ProBranchModel> branchModels,
+        int? maxWorkerCount = null)
     {
-        return Enum.GetValues<ProBranch>().Select(branch => TrainBranch(branch, samples, indices)).ToArray();
+        var rows = new ProFusionTrainingData[indices.Count];
+        if (rows.Length == 0)
+            return new List<ProFusionTrainingData>();
+
+        int workerCount = Math.Clamp(maxWorkerCount ?? Environment.ProcessorCount, 1, rows.Length);
+        var workers = new BranchPredictionEngines[workerCount];
+        try
+        {
+            for (int worker = 0; worker < workerCount; worker++)
+                workers[worker] = new BranchPredictionEngines(_mlContext, branchModels);
+
+            int chunkSize = (rows.Length + workerCount - 1) / workerCount;
+            Parallel.For(0, workerCount, worker =>
+            {
+                BranchPredictionEngines engines = workers[worker];
+                int start = worker * chunkSize;
+                int end = Math.Min(rows.Length, start + chunkSize);
+                for (int position = start; position < end; position++)
+                {
+                    ProStackingSample sample = samples[indices[position]];
+                    rows[position] = new ProFusionTrainingData
+                    {
+                        Features = engines.Predict(sample.Features),
+                        Label = sample.Label
+                    };
+                }
+            });
+        }
+        finally
+        {
+            foreach (BranchPredictionEngines engines in workers)
+                engines?.Dispose();
+        }
+
+        return new List<ProFusionTrainingData>(rows);
     }
 
-    private ProBranchModel TrainBranch(ProBranch branch, IReadOnlyList<ProStackingSample> samples, IReadOnlyList<int> indices)
+    internal IReadOnlyList<ProBranchModel> TrainBranches(
+        IReadOnlyList<ProStackingSample> samples,
+        IReadOnlyList<int> indices,
+        int parallelBranchCount,
+        int? threadsPerBranch)
+    {
+        var models = new ProBranchModel[Branches.Length];
+        Parallel.ForEach(
+            Branches,
+            new ParallelOptions { MaxDegreeOfParallelism = parallelBranchCount },
+            branch => models[(int)branch] = TrainBranch(branch, samples, indices, threadsPerBranch));
+        return models;
+    }
+
+    private ProBranchModel TrainBranch(
+        ProBranch branch,
+        IReadOnlyList<ProStackingSample> samples,
+        IReadOnlyList<int> indices,
+        int? threadsPerBranch)
     {
         int featureCount = BranchFeatureCount(branch);
-        var rows = indices.Select(index => new ProBinaryTrainingData(featureCount)
+        var rows = new ProBinaryTrainingData[indices.Count];
+        for (int position = 0; position < indices.Count; position++)
         {
-            Features = ExtractBranch(samples[index].Features, branch),
-            Label = samples[index].Label
-        }).ToList();
+            ProStackingSample sample = samples[indices[position]];
+            rows[position] = new ProBinaryTrainingData
+            {
+                Features = ExtractBranch(sample.Features, branch),
+                Label = sample.Label
+            };
+        }
         IDataView data = CreateDataView(_mlContext, rows, featureCount);
-        ITransformer model = _branchLearner.BuildPipeline(_mlContext, _config).Fit(data);
+        ITransformer model = _branchLearner.BuildPipeline(_mlContext, _config, threadsPerBranch).Fit(data);
         return new ProBranchModel(branch, featureCount, model, data);
     }
 
@@ -180,6 +243,13 @@ internal sealed class ProStackingTrainer
 
     internal static float[] ExtractBranch(float[] features, ProBranch branch)
     {
+        var result = new float[BranchFeatureCount(branch)];
+        CopyBranch(features, branch, result);
+        return result;
+    }
+
+    internal static void CopyBranch(float[] features, ProBranch branch, Span<float> destination)
+    {
         var (offset, count) = branch switch
         {
             ProBranch.Standard => (FeatureSchema.ProStandardOffset, FeatureSchema.StandardFeatureCount),
@@ -188,9 +258,9 @@ internal sealed class ProStackingTrainer
             ProBranch.Structural => (FeatureSchema.ProStructuralOffset, FeatureSchema.ProStructuralCount),
             _ => throw new ArgumentOutOfRangeException(nameof(branch))
         };
-        var result = new float[count];
-        Array.Copy(features, offset, result, 0, count);
-        return result;
+        if (destination.Length != count)
+            throw new ArgumentException("Pro branch destination length mismatch.", nameof(destination));
+        features.AsSpan(offset, count).CopyTo(destination);
     }
 
     internal static int BranchFeatureCount(ProBranch branch) => branch switch
@@ -238,37 +308,43 @@ internal sealed class ProStackingTrainer
 
     private sealed class BranchPredictionEngines : IDisposable
     {
-        private readonly Dictionary<ProBranch, PredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>> _engines = new();
+        private readonly BranchPredictionState?[] _states = new BranchPredictionState?[Branches.Length];
 
         public BranchPredictionEngines(MLContext mlContext, IReadOnlyList<ProBranchModel> models)
         {
             foreach (var branch in models)
             {
-                _engines[branch.Branch] = mlContext.Model.CreatePredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>(
+                var engine = mlContext.Model.CreatePredictionEngine<ProBinaryTrainingData, BinaryModelPrediction>(
                     branch.Model,
                     inputSchemaDefinition: CreateSchema(branch.FeatureCount));
+                _states[(int)branch.Branch] = new BranchPredictionState(
+                    engine,
+                    new ProBinaryTrainingData { Features = new float[branch.FeatureCount] });
             }
         }
 
         public float[] Predict(float[] features)
         {
             var scores = new float[FeatureSchema.ProFusionFeatureCount];
-            foreach (ProBranch branch in Enum.GetValues<ProBranch>())
+            for (int branchIndex = 0; branchIndex < _states.Length; branchIndex++)
             {
-                float[] branchFeatures = ExtractBranch(features, branch);
-                scores[(int)branch] = _engines[branch].Predict(new ProBinaryTrainingData(branchFeatures.Length)
-                {
-                    Features = branchFeatures
-                }).Probability;
+                BranchPredictionState state = _states[branchIndex]
+                    ?? throw new InvalidOperationException($"Pro {Branches[branchIndex]} 分支缺少预测引擎。");
+                CopyBranch(features, Branches[branchIndex], state.Input.Features);
+                scores[branchIndex] = state.Engine.Predict(state.Input).Probability;
             }
             return scores;
         }
 
         public void Dispose()
         {
-            foreach (var engine in _engines.Values)
-                engine.Dispose();
+            foreach (BranchPredictionState? state in _states)
+                state?.Engine.Dispose();
         }
+
+        private sealed record BranchPredictionState(
+            PredictionEngine<ProBinaryTrainingData, BinaryModelPrediction> Engine,
+            ProBinaryTrainingData Input);
     }
 }
 

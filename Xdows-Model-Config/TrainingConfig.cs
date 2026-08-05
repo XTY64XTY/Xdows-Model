@@ -59,6 +59,7 @@ public class TrainingConfig
     public int ProMaximumTreeDepth { get; set; } = 8;
     public double ProFeatureFraction { get; set; } = 0.85;
     public double ProSubsampleFraction { get; set; } = 0.8;
+    public int ProMaxParallelBranches { get; set; } = 4;
 
     public void PrintStandardConfig()
     {
@@ -106,6 +107,7 @@ public class TrainingConfig
         Console.WriteLine($"最大树深度: {ProMaximumTreeDepth}");
         Console.WriteLine($"特征采样比例: {ProFeatureFraction}");
         Console.WriteLine($"样本采样比例: {ProSubsampleFraction}");
+        Console.WriteLine($"并行分支数: {ProMaxParallelBranches}");
         Console.WriteLine($"判毒阈值: {ProThreshold}%");
         Console.WriteLine($"Raw 统计特征: 3 段 × 40 维 = 120 维 (固定)");
         Console.WriteLine($"总特征维度: 519 (299 + 68 + 120 + 32)");

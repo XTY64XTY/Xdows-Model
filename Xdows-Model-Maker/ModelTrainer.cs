@@ -110,28 +110,18 @@ public class ModelTrainer
     {
         int featureCount = ProHybridFileFeatures.FeatureCount;
 
-        var validData = new List<ProFeatureCacheEntry>();
-        var validFeatures = new List<float[]>();
+        var samples = new List<ProStackingSample>(featureCache.Entries.Count);
         int emptyFeaturesCount = 0;
 
         foreach (var entry in featureCache.Entries)
         {
-            try
-            {
-                var floatArray = entry.CreateFeatures();
-                if (floatArray.Length != featureCount)
-                {
-                    emptyFeaturesCount++;
-                }
-                else
-                {
-                    validData.Add(entry);
-                    validFeatures.Add(floatArray);
-                }
-            }
-            catch
+            if (entry.Features.Length != featureCount)
             {
                 emptyFeaturesCount++;
+            }
+            else
+            {
+                samples.Add(new ProStackingSample(entry.Features, entry.Label));
             }
         }
 
@@ -144,16 +134,16 @@ public class ModelTrainer
         if (featureCache.FailedCount > 0)
             Console.WriteLine($"  Pro 缓存阶段已跳过 {featureCache.FailedCount} 个不兼容文件");
 
-        if (validData.Count == 0)
+        if (samples.Count == 0)
         {
             Console.WriteLine("  错误：没有有效的训练数据！");
             return null;
         }
 
-        Console.WriteLine($"  有效训练数据：{validData.Count} 个");
+        Console.WriteLine($"  有效训练数据：{samples.Count} 个");
 
-        var blackCount = validData.Count(d => d.Label);
-        var whiteCount = validData.Count(d => !d.Label);
+        var blackCount = samples.Count(d => d.Label);
+        var whiteCount = samples.Count(d => !d.Label);
         Console.WriteLine($"  黑文件：{blackCount}，白文件：{whiteCount}");
 
         if (blackCount == 0 || whiteCount == 0)
@@ -162,7 +152,6 @@ public class ModelTrainer
             return null;
         }
 
-        var samples = validData.Select((fd, idx) => new ProStackingSample(validFeatures[idx], fd.Label)).ToList();
         Console.WriteLine($"  正在训练 Pro {_proLearner.Name} Stacking 模型...");
         var result = new ProStackingTrainer(_mlContext, _config, _proLearner).Train(samples);
         var evaluation = result.Evaluation;
@@ -256,7 +245,7 @@ public class ModelTrainer
                 branch.Model,
                 inputSchemaDefinition: ProStackingTrainer.CreateSchema(branch.FeatureCount));
             float[] branchFeatures = ProStackingTrainer.ExtractBranch(proFeatures, branch.Branch);
-            branchScores[(int)branch.Branch] = engine.Predict(new ProBinaryTrainingData(branch.FeatureCount)
+            branchScores[(int)branch.Branch] = engine.Predict(new ProBinaryTrainingData
             {
                 Features = branchFeatures
             }).Probability;
@@ -278,7 +267,8 @@ public class ModelTrainer
 
         Console.WriteLine($"\n开始训练{modeLabel}模型...");
 
-        var validData = new List<FileData>();
+        var validData = new List<FileData>(fileData.Count);
+        var validFeatures = new List<float[]>(fileData.Count);
         int emptyFeaturesCount = 0;
         int wrongSizeCount = 0;
 
@@ -300,6 +290,7 @@ public class ModelTrainer
             else
             {
                 validData.Add(fd);
+                validFeatures.Add(features);
             }
         }
 
@@ -322,21 +313,29 @@ public class ModelTrainer
 
         if (flash)
         {
-            var trainingData = validData.Select(fd => new FlashBinaryTrainingData
+            var trainingData = new List<FlashBinaryTrainingData>(validData.Count);
+            for (int i = 0; i < validData.Count; i++)
             {
-                Features = fd.FlashFeatures.ToFloatArray(),
-                Label = fd.Label
-            }).ToList();
+                trainingData.Add(new FlashBinaryTrainingData
+                {
+                    Features = validFeatures[i],
+                    Label = validData[i].Label
+                });
+            }
             fullDataView = _mlContext.Data.LoadFromEnumerable(trainingData);
             labelColumnName = nameof(FlashBinaryTrainingData.Label);
         }
         else
         {
-            standardRows = validData.Select(fd => new BinaryTrainingData
+            standardRows = new List<BinaryTrainingData>(validData.Count);
+            for (int i = 0; i < validData.Count; i++)
             {
-                Features = fd.Features.ToFloatArray(),
-                Label = fd.Label
-            }).ToList();
+                standardRows.Add(new BinaryTrainingData
+                {
+                    Features = validFeatures[i],
+                    Label = validData[i].Label
+                });
+            }
             fullDataView = _mlContext.Data.LoadFromEnumerable(standardRows);
             labelColumnName = nameof(BinaryTrainingData.Label);
         }
@@ -469,7 +468,8 @@ public class ModelTrainer
 
         var metrics = _mlContext.BinaryClassification.Evaluate(predictions, labelColumnName: labelColumnName);
         var rows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(predictions, reuseRowObject: false).ToList();
-        var thresholdMetrics = ComputeThresholdMetrics(rows, threshold);
+        var sweep = new ThresholdSweep(rows);
+        var thresholdMetrics = sweep.Compute(threshold);
 
         Console.WriteLine("\n=== 模型评估结果 ===");
         Console.WriteLine($"AUC: {metrics.AreaUnderRocCurve:P4}");
@@ -487,7 +487,7 @@ public class ModelTrainer
         if (maximumFalsePositiveRate.HasValue)
         {
             var constrained = StandardTrainingPolicy.FindThresholdAtMaximumFalsePositiveRate(
-                rows,
+                sweep,
                 maximumFalsePositiveRate.Value);
             Console.WriteLine($"\n低误报校准（FPR <= {maximumFalsePositiveRate.Value:P2}）:");
             Console.WriteLine($"推荐阈值: {constrained.Threshold:F1}%");
@@ -498,24 +498,15 @@ public class ModelTrainer
 
     internal static ThresholdMetrics ComputeThresholdMetrics(List<ThresholdEvaluationRow> rows, double threshold)
     {
-        long truePositive = 0;
-        long falseNegative = 0;
-        long falsePositive = 0;
-        long trueNegative = 0;
+        return new ThresholdSweep(rows).Compute(threshold);
+    }
 
-        foreach (var row in rows)
-        {
-            bool predictedPositive = row.Probability * 100 >= threshold;
-            if (row.Label && predictedPositive)
-                truePositive++;
-            else if (row.Label)
-                falseNegative++;
-            else if (predictedPositive)
-                falsePositive++;
-            else
-                trueNegative++;
-        }
-
+    internal static ThresholdMetrics CreateThresholdMetrics(
+        long truePositive,
+        long falseNegative,
+        long falsePositive,
+        long trueNegative)
+    {
         long total = truePositive + falseNegative + falsePositive + trueNegative;
         double accuracy = total > 0 ? (double)(truePositive + trueNegative) / total : 0;
         double precision = truePositive + falsePositive > 0 ? (double)truePositive / (truePositive + falsePositive) : 0;
@@ -536,12 +527,17 @@ public class ModelTrainer
 
     internal static (double threshold, ThresholdMetrics metrics) FindBestThreshold(List<ThresholdEvaluationRow> rows)
     {
+        return FindBestThreshold(new ThresholdSweep(rows));
+    }
+
+    internal static (double threshold, ThresholdMetrics metrics) FindBestThreshold(ThresholdSweep sweep)
+    {
         double bestThreshold = 50;
         ThresholdMetrics? bestMetrics = null;
 
         for (double threshold = 50; threshold <= 99.9; threshold += 0.1)
         {
-            var metrics = ComputeThresholdMetrics(rows, threshold);
+            var metrics = sweep.Compute(threshold);
             if (bestMetrics == null ||
                 metrics.F1Score > bestMetrics.F1Score + 0.000001 ||
                 (Math.Abs(metrics.F1Score - bestMetrics.F1Score) <= 0.000001 &&
@@ -555,7 +551,7 @@ public class ModelTrainer
             }
         }
 
-        return (bestThreshold, bestMetrics ?? ComputeThresholdMetrics(rows, bestThreshold));
+        return (bestThreshold, bestMetrics ?? sweep.Compute(bestThreshold));
     }
 
     public void Predict(ITransformer model, FileData fileData)
@@ -643,13 +639,6 @@ public class ProBinaryTrainingData
     public float[] Features { get; set; } = Array.Empty<float>();
 
     public bool Label { get; set; }
-
-    public ProBinaryTrainingData(int featureCount)
-    {
-        Features = new float[featureCount];
-    }
-
-    public ProBinaryTrainingData() { }
 }
 
 public class BinaryModelPrediction

@@ -2,7 +2,7 @@ using Xdows_Model_Config;
 
 namespace Xdows_Model_Invoker;
 
-internal static class AdaptiveFeatureComposer
+public static class AdaptiveFeatureComposer
 {
     public static float[] ComposePro(byte[] bytes, float[] standardFeatures, float[] flashFeatures)
     {

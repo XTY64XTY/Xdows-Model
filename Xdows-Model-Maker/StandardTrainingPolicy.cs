@@ -45,16 +45,22 @@ internal static class StandardTrainingPolicy
         IReadOnlyList<ThresholdEvaluationRow> rows,
         double maximumFalsePositiveRate)
     {
+        return FindThresholdAtMaximumFalsePositiveRate(new ThresholdSweep(rows), maximumFalsePositiveRate);
+    }
+
+    public static StandardThresholdSelection FindThresholdAtMaximumFalsePositiveRate(
+        ThresholdSweep sweep,
+        double maximumFalsePositiveRate)
+    {
         if (maximumFalsePositiveRate < 0 || maximumFalsePositiveRate > 1)
             throw new ArgumentOutOfRangeException(nameof(maximumFalsePositiveRate));
 
-        List<ThresholdEvaluationRow> materializedRows = rows as List<ThresholdEvaluationRow> ?? rows.ToList();
         double bestThreshold = 100.0;
-        ThresholdMetrics bestMetrics = ModelTrainer.ComputeThresholdMetrics(materializedRows, bestThreshold);
+        ThresholdMetrics bestMetrics = sweep.Compute(bestThreshold);
 
         for (double threshold = 50.0; threshold <= 100.0; threshold += 0.1)
         {
-            ThresholdMetrics metrics = ModelTrainer.ComputeThresholdMetrics(materializedRows, threshold);
+            ThresholdMetrics metrics = sweep.Compute(threshold);
             if (metrics.FalsePositiveRate > maximumFalsePositiveRate + 0.000000001)
                 continue;
 
