@@ -61,6 +61,18 @@ public class TrainingConfig
     public double ProSubsampleFraction { get; set; } = 0.8;
     public int ProMaxParallelBranches { get; set; } = 4;
 
+    public int? TrainingThreadCount { get; set; }
+    public bool ForceColumnWiseHistogram { get; set; } = true;
+
+    public void PrintThreadingConfig()
+    {
+        string threadLabel = TrainingThreadCount is { } configured && configured > 0
+            ? configured.ToString()
+            : "物理核心数";
+        Console.WriteLine($"LightGBM 线程数: {threadLabel}");
+        Console.WriteLine($"强制列向直方图: {ForceColumnWiseHistogram}");
+    }
+
     public void PrintStandardConfig()
     {
         Console.WriteLine("\n=== Standard 模型配置 ===");
@@ -76,6 +88,7 @@ public class TrainingConfig
         Console.WriteLine($"阈值校准目标 FPR: {StandardTargetFalsePositiveRate:P2}");
         Console.WriteLine($"判毒阈值: {StandardThreshold}%");
         Console.WriteLine($"随机种子: {RandomSeed}");
+        PrintThreadingConfig();
         Console.WriteLine("========================\n");
     }
 
@@ -90,6 +103,7 @@ public class TrainingConfig
         Console.WriteLine($"L2 正则化: {FlashL2Regularization}");
         Console.WriteLine($"最大树深度: {FlashMaximumTreeDepth}");
         Console.WriteLine($"判毒阈值: {FlashThreshold}%");
+        PrintThreadingConfig();
         Console.WriteLine("========================\n");
     }
 
@@ -108,6 +122,7 @@ public class TrainingConfig
         Console.WriteLine($"特征采样比例: {ProFeatureFraction}");
         Console.WriteLine($"样本采样比例: {ProSubsampleFraction}");
         Console.WriteLine($"并行分支数: {ProMaxParallelBranches}");
+        PrintThreadingConfig();
         Console.WriteLine($"判毒阈值: {ProThreshold}%");
         Console.WriteLine($"Raw 统计特征: 3 段 × 40 维 = 120 维 (固定)");
         Console.WriteLine($"总特征维度: 519 (299 + 68 + 120 + 32)");

@@ -70,10 +70,12 @@ AssertProFeatureCacheReuse();
 AssertProBranchCopy();
 AssertThresholdSweepEquivalence();
 AssertProParallelScoringEquivalence();
+AssertTrainingThreadResolution();
 Console.WriteLine("PASS: Standard training policy preserves class balance and optimizes recall under an FPR cap.");
 Console.WriteLine("PASS: Pro training reuses prepared features and branch copies preserve feature values.");
 Console.WriteLine("PASS: Threshold sweep matches the exhaustive per-row confusion matrix.");
 Console.WriteLine("PASS: Parallel Pro branch scoring reproduces the single-threaded fusion features.");
+Console.WriteLine("PASS: LightGBM thread resolution prefers physical cores and honors explicit overrides.");
 
 static void AssertModelModeContract()
 {
@@ -186,6 +188,31 @@ static void AssertProBranchCopy()
     }
 }
 
+static void AssertTrainingThreadResolution()
+{
+    int logicalCoreCount = Math.Max(1, Environment.ProcessorCount);
+    int physicalCoreCount = TrainingHardware.PhysicalCoreCount;
+    if (physicalCoreCount < 1 || physicalCoreCount > logicalCoreCount)
+        throw new InvalidOperationException($"Physical core count {physicalCoreCount} is outside 1..{logicalCoreCount}.");
+
+    if (TrainingHardware.ResolveTrainingThreadCount(null) != physicalCoreCount)
+        throw new InvalidOperationException("Default LightGBM thread count must fall back to the physical core count.");
+
+    if (TrainingHardware.ResolveTrainingThreadCount(2) != Math.Min(2, logicalCoreCount))
+        throw new InvalidOperationException("Explicit LightGBM thread count was not honored.");
+
+    if (TrainingHardware.ResolveTrainingThreadCount(logicalCoreCount * 4) != logicalCoreCount)
+        throw new InvalidOperationException("LightGBM thread count must be clamped to the logical core count.");
+
+    if (TrainingHardware.ResolveTrainingThreadCount(0) != physicalCoreCount ||
+        TrainingHardware.ResolveTrainingThreadCount(-1) != physicalCoreCount)
+    {
+        throw new InvalidOperationException("Non-positive thread overrides must fall back to the physical core count.");
+    }
+
+    Console.WriteLine($"  INFO logicalCores={logicalCoreCount} physicalCores={physicalCoreCount}");
+}
+
 static void AssertProParallelScoringEquivalence()
 {
     var random = new Random(43846);
@@ -208,7 +235,7 @@ static void AssertProParallelScoringEquivalence()
     };
     var trainer = new ProStackingTrainer(new MLContext(seed: config.RandomSeed), config, new ProGbdtLearner());
     int[] indices = Enumerable.Range(0, samples.Count).ToArray();
-    IReadOnlyList<ProBranchModel> branchModels = trainer.TrainBranches(samples, indices, 1, null);
+    IReadOnlyList<ProBranchModel> branchModels = trainer.TrainBranches(samples, indices, 1, 1);
 
     List<ProFusionTrainingData> serial = trainer.ScoreSamples(samples, indices, branchModels, maxWorkerCount: 1);
     List<ProFusionTrainingData> parallel = trainer.ScoreSamples(samples, indices, branchModels);

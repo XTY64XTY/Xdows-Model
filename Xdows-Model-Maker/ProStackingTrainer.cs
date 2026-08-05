@@ -89,11 +89,9 @@ internal sealed class ProStackingTrainer
         int parallelBranchCount = samples.Count >= MinimumSamplesForParallelBranches
             ? _maxParallelBranchCount
             : 1;
-        int? threadsPerBranch = parallelBranchCount == 1
-            ? null
-            : Math.Max(1, Environment.ProcessorCount / parallelBranchCount);
-        string threadBudget = threadsPerBranch?.ToString() ?? "自动";
-        Console.WriteLine($"  Pro 并行度：{parallelBranchCount} 个分支，LightGBM 每分支线程：{threadBudget}");
+        int trainingThreadCount = TrainingHardware.ResolveTrainingThreadCount(_config.TrainingThreadCount);
+        int threadsPerBranch = Math.Max(1, trainingThreadCount / parallelBranchCount);
+        Console.WriteLine($"  Pro 并行度：{parallelBranchCount} 个分支，LightGBM 每分支线程：{threadsPerBranch}");
         var folds = CreateStratifiedFolds(samples, trainIndices, foldCount, (_config.RandomSeed ?? 43846) + 1);
         var oofRows = new List<ProFusionTrainingData>(trainIndices.Length);
 
@@ -197,7 +195,7 @@ internal sealed class ProStackingTrainer
         IReadOnlyList<ProStackingSample> samples,
         IReadOnlyList<int> indices,
         int parallelBranchCount,
-        int? threadsPerBranch)
+        int threadsPerBranch)
     {
         var models = new ProBranchModel[Branches.Length];
         Parallel.ForEach(
@@ -211,7 +209,7 @@ internal sealed class ProStackingTrainer
         ProBranch branch,
         IReadOnlyList<ProStackingSample> samples,
         IReadOnlyList<int> indices,
-        int? threadsPerBranch)
+        int threadsPerBranch)
     {
         int featureCount = BranchFeatureCount(branch);
         var rows = new ProBinaryTrainingData[indices.Count];

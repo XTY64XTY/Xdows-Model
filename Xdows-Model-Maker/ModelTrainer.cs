@@ -418,6 +418,8 @@ public class ModelTrainer
             NumberOfLeaves = _config.NumberOfLeaves,
             MinimumExampleCountPerLeaf = _config.MinimumExampleCountPerLeaf,
             NumberOfIterations = _config.NumberOfIterations,
+            NumberOfThreads = TrainingHardware.ResolveTrainingThreadCount(_config.TrainingThreadCount),
+            ForceColumnWise = _config.ForceColumnWiseHistogram,
             Deterministic = true,
             Seed = _config.RandomSeed,
             Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
@@ -444,6 +446,8 @@ public class ModelTrainer
             NumberOfLeaves = _config.FlashNumberOfLeaves,
             MinimumExampleCountPerLeaf = _config.FlashMinimumExampleCountPerLeaf,
             NumberOfIterations = _config.FlashNumberOfIterations,
+            NumberOfThreads = TrainingHardware.ResolveTrainingThreadCount(_config.TrainingThreadCount),
+            ForceColumnWise = _config.ForceColumnWiseHistogram,
             Deterministic = true,
             Seed = _config.RandomSeed,
             Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
