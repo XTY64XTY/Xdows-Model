@@ -19,6 +19,7 @@ internal sealed class ProGbdtLearner
             NumberOfIterations = config.ProNumberOfIterations,
             NumberOfThreads = numberOfThreads ?? TrainingHardware.ResolveTrainingThreadCount(config.TrainingThreadCount),
             ForceColumnWise = config.ForceColumnWiseHistogram,
+            WeightOfPositiveExamples = config.ResolveWeightOfPositiveExamples(),
             Deterministic = true,
             Seed = config.RandomSeed,
             Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options

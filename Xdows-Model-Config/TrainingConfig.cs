@@ -64,6 +64,47 @@ public class TrainingConfig
     public int? TrainingThreadCount { get; set; }
     public bool ForceColumnWiseHistogram { get; set; } = true;
 
+    /// <summary>
+    /// 一个误报相当于多少个漏报。用于阈值选择与训练样本加权，使两者的优化目标一致。
+    /// </summary>
+    public double FalsePositiveCostRatio { get; set; } = 2.65;
+
+    /// <summary>
+    /// 是否按 <see cref="FalsePositiveCostRatio"/> 自动挑选判毒阈值，覆盖固定阈值。
+    /// </summary>
+    public bool UseCostSensitiveThreshold { get; set; } = true;
+
+    /// <summary>
+    /// 是否把误报代价传导到 LightGBM 的正类权重，让训练目标与阈值目标一致。
+    /// </summary>
+    public bool UseCostSensitiveTrainingWeight { get; set; } = true;
+
+    /// <summary>
+    /// LightGBM 正类（黑样本）权重。默认由 <see cref="FalsePositiveCostRatio"/> 推导为 1/代价比。
+    /// </summary>
+    public double? WeightOfPositiveExamples { get; set; }
+
+    /// <summary>
+    /// 解析实际使用的正类权重。误报越贵，正类权重越低，模型越不愿意把白样本判黑。
+    /// </summary>
+    public double ResolveWeightOfPositiveExamples()
+    {
+        if (WeightOfPositiveExamples is { } explicitWeight)
+        {
+            if (!double.IsFinite(explicitWeight) || explicitWeight <= 0)
+                throw new InvalidOperationException("正类权重必须是正有限值。");
+            return explicitWeight;
+        }
+
+        if (!UseCostSensitiveTrainingWeight)
+            return 1.0;
+
+        if (!double.IsFinite(FalsePositiveCostRatio) || FalsePositiveCostRatio <= 0)
+            throw new InvalidOperationException("误报代价比必须是正有限值。");
+
+        return 1.0 / FalsePositiveCostRatio;
+    }
+
     public void PrintThreadingConfig()
     {
         string threadLabel = TrainingThreadCount is { } configured && configured > 0
@@ -71,6 +112,9 @@ public class TrainingConfig
             : "物理核心数";
         Console.WriteLine($"LightGBM 线程数: {threadLabel}");
         Console.WriteLine($"强制列向直方图: {ForceColumnWiseHistogram}");
+        Console.WriteLine($"误报代价比 (1 误报 = N 漏报): {FalsePositiveCostRatio}");
+        Console.WriteLine($"代价敏感阈值选择: {UseCostSensitiveThreshold}");
+        Console.WriteLine($"正类权重: {ResolveWeightOfPositiveExamples():F4}");
     }
 
     public void PrintStandardConfig()

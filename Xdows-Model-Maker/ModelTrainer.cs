@@ -96,6 +96,7 @@ public class ModelTrainer
 
         _lastProTrainingResult = result;
         WriteProEvaluationReport(modelPath, result.Evaluation);
+        WriteProThresholdManifest(modelPath, onnxPath, result.Evaluation);
 
         Console.WriteLine($"\n=== Pro GBDT 混合特征模型训练完成 ===");
         Console.WriteLine($"最终特征维度：{ProHybridFileFeatures.FeatureCount}");
@@ -208,9 +209,42 @@ public class ModelTrainer
                     TruePositiveRate = evaluation.TestBestThresholdMetrics.TruePositiveRate,
                     FalsePositiveRate = evaluation.TestBestThresholdMetrics.FalsePositiveRate
                 },
+                CostSensitiveThreshold = new
+                {
+                    FalsePositiveCostRatio = _config.FalsePositiveCostRatio,
+                    Applied = _config.UseCostSensitiveThreshold,
+                    OperatingThreshold = evaluation.OperatingThreshold,
+                    Threshold = evaluation.CostThreshold.Threshold,
+                    WeightedCost = evaluation.CostThreshold.Cost,
+                    TruePositiveRate = evaluation.CostThreshold.Metrics.TruePositiveRate,
+                    FalsePositiveRate = evaluation.CostThreshold.Metrics.FalsePositiveRate,
+                    ConfusionMatrix = new
+                    {
+                        TP = evaluation.CostThreshold.Metrics.TruePositive,
+                        FN = evaluation.CostThreshold.Metrics.FalseNegative,
+                        FP = evaluation.CostThreshold.Metrics.FalsePositive,
+                        TN = evaluation.CostThreshold.Metrics.TrueNegative
+                    }
+                },
+                ConfiguredThreshold = new
+                {
+                    Threshold = _config.ProThreshold,
+                    WeightedCost = CostSensitiveThreshold.ComputeCost(evaluation.ConfiguredThresholdMetrics, _config.FalsePositiveCostRatio),
+                    TruePositiveRate = evaluation.ConfiguredThresholdMetrics.TruePositiveRate,
+                    FalsePositiveRate = evaluation.ConfiguredThresholdMetrics.FalsePositiveRate,
+                    ConfusionMatrix = new
+                    {
+                        TP = evaluation.ConfiguredThresholdMetrics.TruePositive,
+                        FN = evaluation.ConfiguredThresholdMetrics.FalseNegative,
+                        FP = evaluation.ConfiguredThresholdMetrics.FalsePositive,
+                        TN = evaluation.ConfiguredThresholdMetrics.TrueNegative
+                    }
+                },
                 Config = new
                 {
                     ProThreshold = _config.ProThreshold,
+                    FalsePositiveCostRatio = _config.FalsePositiveCostRatio,
+                    WeightOfPositiveExamples = _config.ResolveWeightOfPositiveExamples(),
                     ProLearningRate = _config.ProLearningRate,
                     ProNumberOfLeaves = _config.ProNumberOfLeaves,
                     ProMinimumExampleCountPerLeaf = _config.ProMinimumExampleCountPerLeaf,
@@ -229,6 +263,86 @@ public class ModelTrainer
         catch (Exception ex)
         {
             Console.WriteLine($"  评估报告保存失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 把校准出的工作点写成模型旁的阈值清单，让调用端无需手改配置即可采用推荐阈值。
+    /// ML.NET 与 ONNX 两个产物各写一份，因为调用端加载的是 ONNX。
+    /// </summary>
+    private void WriteProThresholdManifest(string modelPath, string? onnxPath, ProTrainingEvaluation evaluation)
+    {
+        if (!_config.UseCostSensitiveThreshold)
+            return;
+
+        var manifest = new ModelThresholdManifest
+        {
+            ModelMode = nameof(ModelMode.Pro),
+            RecommendedThreshold = evaluation.OperatingThreshold,
+            SelectionMethod = $"代价敏感（1 误报 = {_config.FalsePositiveCostRatio} 漏报）",
+            FalsePositiveCostRatio = _config.FalsePositiveCostRatio,
+            FalseNegative = evaluation.TestThresholdMetrics.FalseNegative,
+            FalsePositive = evaluation.TestThresholdMetrics.FalsePositive,
+            TruePositiveRate = evaluation.TestThresholdMetrics.TruePositiveRate,
+            FalsePositiveRate = evaluation.TestThresholdMetrics.FalsePositiveRate,
+            EvaluatedSamples = evaluation.TestThresholdMetrics.TruePositive
+                + evaluation.TestThresholdMetrics.FalseNegative
+                + evaluation.TestThresholdMetrics.FalsePositive
+                + evaluation.TestThresholdMetrics.TrueNegative,
+            GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+        };
+
+        SaveThresholdManifest(manifest, modelPath, onnxPath);
+    }
+
+    /// <summary>
+    /// Standard / Flash 的阈值清单。与 Pro 使用同一套代价目标，保证三种模式的工作点口径一致。
+    /// </summary>
+    private void WriteThresholdManifest(
+        string modelPath,
+        string? onnxPath,
+        ModelMode mode,
+        CostThresholdSelection costSelection)
+    {
+        if (!_config.UseCostSensitiveThreshold)
+            return;
+
+        var manifest = new ModelThresholdManifest
+        {
+            ModelMode = mode.ToString(),
+            RecommendedThreshold = costSelection.Threshold,
+            SelectionMethod = $"代价敏感（1 误报 = {_config.FalsePositiveCostRatio} 漏报）",
+            FalsePositiveCostRatio = _config.FalsePositiveCostRatio,
+            FalseNegative = costSelection.Metrics.FalseNegative,
+            FalsePositive = costSelection.Metrics.FalsePositive,
+            TruePositiveRate = costSelection.Metrics.TruePositiveRate,
+            FalsePositiveRate = costSelection.Metrics.FalsePositiveRate,
+            EvaluatedSamples = costSelection.Metrics.TruePositive
+                + costSelection.Metrics.FalseNegative
+                + costSelection.Metrics.FalsePositive
+                + costSelection.Metrics.TrueNegative,
+            GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+        };
+
+        SaveThresholdManifest(manifest, modelPath, onnxPath);
+    }
+
+    private static void SaveThresholdManifest(ModelThresholdManifest manifest, string modelPath, string? onnxPath)
+    {
+        foreach (string? path in new[] { modelPath, onnxPath })
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                continue;
+
+            try
+            {
+                manifest.Save(path);
+                Console.WriteLine($"  阈值清单已保存至: {ModelThresholdManifest.ResolvePath(path)}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  阈值清单保存失败（{path}）：{ex.Message}");
+            }
         }
     }
 
@@ -366,7 +480,7 @@ public class ModelTrainer
 
         Console.WriteLine($"正在评估{modeLabel}模型...");
         double threshold = flash ? _config.FlashThreshold : _config.StandardThreshold;
-        EvaluateModel(
+        CostThresholdSelection costSelection = EvaluateModel(
             evaluationModel,
             testData,
             labelColumnName,
@@ -399,6 +513,12 @@ public class ModelTrainer
             }
         }
 
+        WriteThresholdManifest(
+            modelPath,
+            onnxPath,
+            flash ? ModelMode.Flash : ModelMode.Standard,
+            costSelection);
+
         return model;
     }
 
@@ -420,6 +540,7 @@ public class ModelTrainer
             NumberOfIterations = _config.NumberOfIterations,
             NumberOfThreads = TrainingHardware.ResolveTrainingThreadCount(_config.TrainingThreadCount),
             ForceColumnWise = _config.ForceColumnWiseHistogram,
+            WeightOfPositiveExamples = _config.ResolveWeightOfPositiveExamples(),
             Deterministic = true,
             Seed = _config.RandomSeed,
             Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
@@ -448,6 +569,7 @@ public class ModelTrainer
             NumberOfIterations = _config.FlashNumberOfIterations,
             NumberOfThreads = TrainingHardware.ResolveTrainingThreadCount(_config.TrainingThreadCount),
             ForceColumnWise = _config.ForceColumnWiseHistogram,
+            WeightOfPositiveExamples = _config.ResolveWeightOfPositiveExamples(),
             Deterministic = true,
             Seed = _config.RandomSeed,
             Booster = new Microsoft.ML.Trainers.LightGbm.GradientBooster.Options
@@ -461,7 +583,7 @@ public class ModelTrainer
         return _mlContext.BinaryClassification.Trainers.LightGbm(options);
     }
 
-    private void EvaluateModel(
+    private CostThresholdSelection EvaluateModel(
         ITransformer model,
         IDataView testData,
         string labelColumnName,
@@ -498,6 +620,20 @@ public class ModelTrainer
             Console.WriteLine($"检出率 (TPR): {constrained.Metrics.TruePositiveRate:P4}");
             Console.WriteLine($"误报率 (FPR): {constrained.Metrics.FalsePositiveRate:P4}");
         }
+
+        CostThresholdSelection costSelection = CostSensitiveThreshold.FindMinimumCostThreshold(
+            sweep,
+            _config.FalsePositiveCostRatio);
+        Console.WriteLine($"\n代价敏感校准（1 误报 = {_config.FalsePositiveCostRatio} 漏报）:");
+        Console.WriteLine($"推荐阈值: {costSelection.Threshold:F2}%");
+        Console.WriteLine($"检出率 (TPR): {costSelection.Metrics.TruePositiveRate:P4}");
+        Console.WriteLine($"误报率 (FPR): {costSelection.Metrics.FalsePositiveRate:P4}");
+        Console.WriteLine($"FN: {costSelection.Metrics.FalseNegative}, FP: {costSelection.Metrics.FalsePositive}");
+        Console.WriteLine(
+            $"加权代价: {costSelection.Cost:F1}（固定阈值 {threshold:F2}% 为 " +
+            $"{CostSensitiveThreshold.ComputeCost(thresholdMetrics, _config.FalsePositiveCostRatio):F1}）");
+
+        return costSelection;
     }
 
     internal static ThresholdMetrics ComputeThresholdMetrics(List<ThresholdEvaluationRow> rows, double threshold)
@@ -628,7 +764,10 @@ public record ProTrainingEvaluation(
     int TotalSamples,
     int BlackSamples,
     int WhiteSamples,
-    int FeatureCount);
+    int FeatureCount,
+    double OperatingThreshold,
+    CostThresholdSelection CostThreshold,
+    ThresholdMetrics ConfiguredThresholdMetrics);
 
 public class FlashBinaryTrainingData
 {

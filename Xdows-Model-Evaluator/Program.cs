@@ -43,6 +43,8 @@ internal static class Program
         Console.WriteLine($"总样本: {samples.Count}");
         Console.WriteLine();
 
+        ModelInvoker.AutoThresholdSelection = !options.UseFixedThreshold;
+        // 先落配置默认值；每个模式加载模型时会用模型旁的阈值清单覆盖它。
         ModelInvoker.ConfigureThresholds(config);
 
         using var csv = !string.IsNullOrWhiteSpace(options.CsvPath)
@@ -55,7 +57,7 @@ internal static class Program
             try
             {
                 var result = EvaluateMode(mode, samples, options, csv);
-                PrintResult(result);
+                PrintResult(result, config.FalsePositiveCostRatio);
             }
             catch (Exception ex)
             {
@@ -156,7 +158,7 @@ internal static class Program
             .ToList();
     }
 
-    private static void PrintResult(EvaluationResult result)
+    private static void PrintResult(EvaluationResult result, double falsePositiveCostRatio)
     {
         Console.WriteLine($"=== {result.Mode} ===");
         Console.WriteLine($"N: {result.Total}, failed: {result.Failed}");
@@ -171,6 +173,7 @@ internal static class Program
         if (result.Auprc.HasValue)
             Console.WriteLine($"AUPRC: {result.Auprc.Value:P4}");
         Console.WriteLine($"Raw score: {result.RawScore:F2}");
+        Console.WriteLine($"Weighted cost (1 FP = {falsePositiveCostRatio} FN): {result.WeightedCost(falsePositiveCostRatio):F1}");
         Console.WriteLine($"Avg scan time: {result.AverageScanTime.TotalMilliseconds:F3} ms");
     }
 
@@ -211,6 +214,7 @@ internal static class Program
         Console.WriteLine("  --standard-model <path>           Standard ONNX 路径");
         Console.WriteLine("  --flash-model <path>              Flash ONNX 路径");
         Console.WriteLine("  --pro-model <path>                Pro ONNX 路径");
+        Console.WriteLine("  --fixed-threshold                 忽略模型旁阈值清单，使用配置固定阈值");
     }
 }
 
@@ -236,6 +240,13 @@ internal sealed record EvaluationResult(
     public double FalsePositiveRate => FalsePositive + TrueNegative > 0 ? (double)FalsePositive / (FalsePositive + TrueNegative) : 0;
     public double F1Score => Precision + TruePositiveRate > 0 ? 2 * Precision * TruePositiveRate / (Precision + TruePositiveRate) : 0;
     public double RawScore => TruePositive * 10 - FalseNegative * 7 - FalsePositive * 10;
+
+    /// <summary>
+    /// 加权错误代价：漏报权重 1，误报权重为 <paramref name="falsePositiveCostRatio"/>。数值越小越好。
+    /// 与训练器的代价敏感阈值选择使用同一目标函数。
+    /// </summary>
+    public double WeightedCost(double falsePositiveCostRatio) =>
+        FalseNegative + falsePositiveCostRatio * FalsePositive;
     public TimeSpan AverageScanTime => Total > 0 ? TimeSpan.FromTicks(Elapsed.Ticks / Total) : TimeSpan.Zero;
 
     public static EvaluationResult Create(
@@ -335,6 +346,7 @@ internal sealed class EvaluationOptions
     public string? StandardModelPath { get; private init; }
     public string? FlashModelPath { get; private init; }
     public string? ProModelPath { get; private init; }
+    public bool UseFixedThreshold { get; private init; }
 
     public static EvaluationOptions Parse(string[] args)
     {
@@ -373,7 +385,8 @@ internal sealed class EvaluationOptions
             CsvPath = Get(options, "csv"),
             StandardModelPath = Get(options, "standard-model"),
             FlashModelPath = Get(options, "flash-model"),
-            ProModelPath = Get(options, "pro-model")
+            ProModelPath = Get(options, "pro-model"),
+            UseFixedThreshold = options.ContainsKey("fixed-threshold")
         };
     }
 

@@ -49,6 +49,27 @@ internal sealed class ThresholdSweep
         return ModelTrainer.CreateThresholdMetrics(truePositive, falseNegative, falsePositive, trueNegative);
     }
 
+    /// <summary>
+    /// 候选阈值只需覆盖每个实际打分点，遍历它们即可得到与穷举等价的最优解，
+    /// 且不受固定步长（如 0.1）的分辨率限制。
+    /// </summary>
+    public IEnumerable<double> CandidateThresholds(double minimumThreshold, double maximumThreshold)
+    {
+        var candidates = new SortedSet<double> { minimumThreshold, maximumThreshold };
+        foreach (double score in _positiveScores)
+            AddCandidate(candidates, score, minimumThreshold, maximumThreshold);
+        foreach (double score in _negativeScores)
+            AddCandidate(candidates, score, minimumThreshold, maximumThreshold);
+        return candidates;
+    }
+
+    private static void AddCandidate(SortedSet<double> candidates, double score, double minimumThreshold, double maximumThreshold)
+    {
+        if (score < minimumThreshold || score > maximumThreshold)
+            return;
+        candidates.Add(score);
+    }
+
     private static long CountAtLeast(double[] sortedScores, double threshold)
     {
         int low = 0;

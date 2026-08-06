@@ -69,11 +69,18 @@ AssertStandardStratifiedSplit();
 AssertProFeatureCacheReuse();
 AssertProBranchCopy();
 AssertThresholdSweepEquivalence();
+AssertCostSensitiveThresholdSelection();
+AssertCostSensitiveWeightResolution();
+AssertThresholdManifestRoundTrip();
+AssertThresholdManifestRejection();
 AssertProParallelScoringEquivalence();
 AssertTrainingThreadResolution();
 Console.WriteLine("PASS: Standard training policy preserves class balance and optimizes recall under an FPR cap.");
 Console.WriteLine("PASS: Pro training reuses prepared features and branch copies preserve feature values.");
 Console.WriteLine("PASS: Threshold sweep matches the exhaustive per-row confusion matrix.");
+Console.WriteLine("PASS: Cost-sensitive threshold selection minimizes the weighted error cost.");
+Console.WriteLine("PASS: Positive-class weight follows the configured false-positive cost ratio.");
+Console.WriteLine("PASS: Threshold manifests round-trip and invalid manifests fall back to the configured threshold.");
 Console.WriteLine("PASS: Parallel Pro branch scoring reproduces the single-threaded fusion features.");
 Console.WriteLine("PASS: LightGBM thread resolution prefers physical cores and honors explicit overrides.");
 
@@ -249,6 +256,180 @@ static void AssertProParallelScoringEquivalence()
         {
             throw new InvalidOperationException($"Parallel Pro scoring changed fusion row {index}.");
         }
+    }
+}
+
+static void AssertThresholdManifestRoundTrip()
+{
+    string directory = Path.Combine(Path.GetTempPath(), "xdows-threshold-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    try
+    {
+        string modelPath = Path.Combine(directory, "Xdows-Model-Pro.onnx");
+        File.WriteAllText(modelPath, "placeholder");
+
+        var saved = new ModelThresholdManifest
+        {
+            ModelMode = nameof(ModelMode.Pro),
+            RecommendedThreshold = 56.45,
+            SelectionMethod = "代价敏感（1 误报 = 2.65 漏报）",
+            FalsePositiveCostRatio = 2.65,
+            FalseNegative = 12,
+            FalsePositive = 3,
+            TruePositiveRate = 0.96,
+            FalsePositiveRate = 0.0005,
+            EvaluatedSamples = 6000,
+            GeneratedAt = "2026-08-06 00:00:00"
+        };
+        saved.Save(modelPath);
+
+        string expectedPath = Path.Combine(directory, "Xdows-Model-Pro" + ModelThresholdManifest.FileSuffix);
+        if (!File.Exists(expectedPath))
+            throw new InvalidOperationException($"Threshold manifest was not written to {expectedPath}.");
+
+        if (!ModelThresholdManifest.TryLoad(modelPath, nameof(ModelMode.Pro), out ModelThresholdManifest? loaded, out string? failure))
+            throw new InvalidOperationException($"Threshold manifest failed to load: {failure}");
+
+        if (Math.Abs(loaded!.RecommendedThreshold - saved.RecommendedThreshold) > 0.000001 ||
+            loaded.FalseNegative != saved.FalseNegative ||
+            loaded.FalsePositive != saved.FalsePositive ||
+            loaded.SelectionMethod != saved.SelectionMethod)
+        {
+            throw new InvalidOperationException("Threshold manifest did not round-trip its calibrated operating point.");
+        }
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
+    }
+}
+
+static void AssertThresholdManifestRejection()
+{
+    string directory = Path.Combine(Path.GetTempPath(), "xdows-threshold-bad-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    try
+    {
+        string modelPath = Path.Combine(directory, "Xdows-Model.onnx");
+        File.WriteAllText(modelPath, "placeholder");
+        string manifestPath = ModelThresholdManifest.ResolvePath(modelPath);
+
+        if (ModelThresholdManifest.TryLoad(modelPath, nameof(ModelMode.Standard), out _, out string? missingReason))
+            throw new InvalidOperationException("A missing manifest must not be reported as loaded.");
+        if (missingReason != null)
+            throw new InvalidOperationException("A missing manifest is expected, so it must not report a failure reason.");
+
+        File.WriteAllText(manifestPath, "{ not json");
+        if (ModelThresholdManifest.TryLoad(modelPath, nameof(ModelMode.Standard), out _, out string? corruptReason))
+            throw new InvalidOperationException("A corrupt manifest must be rejected.");
+        if (string.IsNullOrEmpty(corruptReason))
+            throw new InvalidOperationException("A corrupt manifest must explain why it was rejected.");
+
+        new ModelThresholdManifest
+        {
+            ModelMode = nameof(ModelMode.Pro),
+            RecommendedThreshold = 50
+        }.Save(modelPath);
+        if (ModelThresholdManifest.TryLoad(modelPath, nameof(ModelMode.Standard), out _, out string? modeReason))
+            throw new InvalidOperationException("A manifest for another model mode must be rejected.");
+        if (string.IsNullOrEmpty(modeReason))
+            throw new InvalidOperationException("A mode mismatch must explain why it was rejected.");
+
+        new ModelThresholdManifest
+        {
+            ModelMode = nameof(ModelMode.Standard),
+            RecommendedThreshold = 150
+        }.Save(modelPath);
+        if (ModelThresholdManifest.TryLoad(modelPath, nameof(ModelMode.Standard), out _, out string? rangeReason))
+            throw new InvalidOperationException("An out-of-range threshold must be rejected.");
+        if (string.IsNullOrEmpty(rangeReason))
+            throw new InvalidOperationException("An out-of-range threshold must explain why it was rejected.");
+
+        new ModelThresholdManifest
+        {
+            SchemaVersion = ModelThresholdManifest.CurrentSchemaVersion + 1,
+            ModelMode = nameof(ModelMode.Standard),
+            RecommendedThreshold = 50
+        }.Save(modelPath);
+        if (ModelThresholdManifest.TryLoad(modelPath, nameof(ModelMode.Standard), out _, out string? versionReason))
+            throw new InvalidOperationException("An unknown manifest version must be rejected.");
+        if (string.IsNullOrEmpty(versionReason))
+            throw new InvalidOperationException("An unknown manifest version must explain why it was rejected.");
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
+    }
+}
+
+static void AssertCostSensitiveThresholdSelection()
+{
+    var rows = new List<ThresholdEvaluationRow>
+    {
+        new() { Label = true, Probability = 0.99f },
+        new() { Label = true, Probability = 0.80f },
+        new() { Label = true, Probability = 0.60f },
+        new() { Label = false, Probability = 0.70f },
+        new() { Label = false, Probability = 0.10f }
+    };
+
+    var sweep = new ThresholdSweep(rows);
+    foreach (double ratio in new[] { 0.5, 1.0, 2.65, 10.0 })
+    {
+        CostThresholdSelection selection = CostSensitiveThreshold.FindMinimumCostThreshold(sweep, ratio);
+
+        double exhaustiveBestCost = double.PositiveInfinity;
+        for (double threshold = 0.1; threshold <= 99.9001; threshold += 0.01)
+        {
+            ThresholdMetrics metrics = ModelTrainer.ComputeThresholdMetrics(rows, threshold);
+            double cost = CostSensitiveThreshold.ComputeCost(metrics, ratio);
+            if (cost < exhaustiveBestCost)
+                exhaustiveBestCost = cost;
+        }
+
+        if (Math.Abs(selection.Cost - exhaustiveBestCost) > 0.000001)
+        {
+            throw new InvalidOperationException(
+                $"Cost-sensitive threshold at ratio {ratio} found cost {selection.Cost}, exhaustive scan found {exhaustiveBestCost}.");
+        }
+
+        if (Math.Abs(CostSensitiveThreshold.ComputeCost(selection.Metrics, ratio) - selection.Cost) > 0.000001)
+            throw new InvalidOperationException("Reported cost does not match the reported confusion matrix.");
+    }
+
+    CostThresholdSelection cheapFalsePositive = CostSensitiveThreshold.FindMinimumCostThreshold(sweep, 0.25);
+    CostThresholdSelection expensiveFalsePositive = CostSensitiveThreshold.FindMinimumCostThreshold(sweep, 20.0);
+    if (expensiveFalsePositive.Metrics.FalsePositive > cheapFalsePositive.Metrics.FalsePositive)
+        throw new InvalidOperationException("A higher false-positive cost must not increase the accepted false positives.");
+    if (expensiveFalsePositive.Threshold < cheapFalsePositive.Threshold)
+        throw new InvalidOperationException("A higher false-positive cost must not lower the selected threshold.");
+
+    if (Math.Abs(CostSensitiveThreshold.BayesOptimalThreshold(1.0) - 50.0) > 0.000001)
+        throw new InvalidOperationException("Equal costs must map to a 50% Bayes-optimal threshold.");
+}
+
+static void AssertCostSensitiveWeightResolution()
+{
+    var config = new TrainingConfig { FalsePositiveCostRatio = 4.0 };
+    if (Math.Abs(config.ResolveWeightOfPositiveExamples() - 0.25) > 0.000001)
+        throw new InvalidOperationException("Positive-class weight must be the reciprocal of the false-positive cost ratio.");
+
+    config.UseCostSensitiveTrainingWeight = false;
+    if (Math.Abs(config.ResolveWeightOfPositiveExamples() - 1.0) > 0.000001)
+        throw new InvalidOperationException("Disabling cost-sensitive training must restore an unweighted objective.");
+
+    config.WeightOfPositiveExamples = 0.5;
+    if (Math.Abs(config.ResolveWeightOfPositiveExamples() - 0.5) > 0.000001)
+        throw new InvalidOperationException("An explicit positive-class weight must override the derived value.");
+
+    var invalid = new TrainingConfig { FalsePositiveCostRatio = 0 };
+    try
+    {
+        invalid.ResolveWeightOfPositiveExamples();
+        throw new InvalidOperationException("A non-positive cost ratio must be rejected.");
+    }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("误报代价比"))
+    {
     }
 }
 

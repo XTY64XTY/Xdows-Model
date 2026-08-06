@@ -119,8 +119,28 @@ internal sealed class ProStackingTrainer
         var thresholdRows = _mlContext.Data.CreateEnumerable<ThresholdEvaluationRow>(testPredictions, false).ToList();
         var trainMetrics = _mlContext.BinaryClassification.Evaluate(fusionModel.Transform(fusionTrainingData));
         var thresholdSweep = new ThresholdSweep(thresholdRows);
-        var thresholdMetrics = thresholdSweep.Compute(_config.ProThreshold);
+        CostThresholdSelection costSelection = CostSensitiveThreshold.FindMinimumCostThreshold(
+            thresholdSweep,
+            _config.FalsePositiveCostRatio);
+        double operatingThreshold = _config.UseCostSensitiveThreshold
+            ? costSelection.Threshold
+            : _config.ProThreshold;
+        var thresholdMetrics = thresholdSweep.Compute(operatingThreshold);
         var (bestThreshold, bestMetrics) = ModelTrainer.FindBestThreshold(thresholdSweep);
+        ThresholdMetrics configuredMetrics = thresholdSweep.Compute(_config.ProThreshold);
+        Console.WriteLine(
+            $"  代价敏感阈值：{costSelection.Threshold:F2}%（误报代价比 {_config.FalsePositiveCostRatio}，" +
+            $"FN {costSelection.Metrics.FalseNegative}，FP {costSelection.Metrics.FalsePositive}，加权代价 {costSelection.Cost:F1}）");
+        Console.WriteLine(
+            $"  固定阈值 {_config.ProThreshold:F2}% 对照：FN {configuredMetrics.FalseNegative}，FP {configuredMetrics.FalsePositive}，" +
+            $"加权代价 {CostSensitiveThreshold.ComputeCost(configuredMetrics, _config.FalsePositiveCostRatio):F1}");
+        Console.WriteLine($"  实际采用阈值：{operatingThreshold:F2}%");
+        if (_config.UseCostSensitiveThreshold && Math.Abs(operatingThreshold - _config.ProThreshold) > 0.005)
+        {
+            Console.WriteLine(
+                $"  注意：推理端仍使用 TrainingConfig.ProThreshold={_config.ProThreshold:F2}%。" +
+                $"若要让线上工作点与本次校准一致，请把 ProThreshold 改为 {operatingThreshold:F2}。");
+        }
         int blackSampleCount = 0;
         foreach (var sample in samples)
         {
@@ -144,7 +164,10 @@ internal sealed class ProStackingTrainer
                 samples.Count,
                 blackSampleCount,
                 samples.Count - blackSampleCount,
-                FeatureSchema.ProFusionFeatureCount)
+                FeatureSchema.ProFusionFeatureCount,
+                operatingThreshold,
+                costSelection,
+                configuredMetrics)
         };
     }
 

@@ -13,7 +13,7 @@ internal static class Program
         Adaptive
     }
 
-    private sealed record CallerOptions(CallerMode Mode, string? ModelPath);
+    private sealed record CallerOptions(CallerMode Mode, string? ModelPath, bool UseFixedThreshold);
 
     private interface IScanEngine : IDisposable
     {
@@ -46,10 +46,12 @@ internal static class Program
 
         try
         {
+            ModelInvoker.AutoThresholdSelection = !options.UseFixedThreshold;
             using IScanEngine engine = CreateEngine(options);
             Console.WriteLine($"正在初始化 {engine.Mode} 模型...");
             engine.Initialize();
             Console.WriteLine($"{engine.Mode} 模型初始化完成。");
+            PrintActiveThreshold(engine.Mode);
             Console.WriteLine();
 
             RunInputLoop(engine);
@@ -114,6 +116,20 @@ internal static class Program
         }
     }
 
+    private static void PrintActiveThreshold(CallerMode mode)
+    {
+        ModelMode modelMode = mode switch
+        {
+            CallerMode.Flash => ModelMode.Flash,
+            CallerMode.Pro => ModelMode.Pro,
+            CallerMode.Adaptive => ModelMode.Adaptive,
+            _ => ModelMode.Standard
+        };
+
+        Console.WriteLine(
+            $"判毒阈值：{ModelInvoker.GetThreshold(modelMode):F2}%（{ModelInvoker.GetThresholdSource(modelMode)}）");
+    }
+
     private static IScanEngine CreateEngine(CallerOptions options) =>
         options.Mode switch
         {
@@ -141,8 +157,10 @@ internal static class Program
 
         public void Initialize()
         {
-            _initialize(_modelPath);
+            // 先落配置默认值，再加载模型：加载过程会用模型旁的阈值清单覆盖默认值。
+            // 顺序颠倒会让固定阈值把清单推荐值覆盖掉。
             ModelInvoker.ConfigureThresholds(new TrainingConfig());
+            _initialize(_modelPath);
             _initialized = true;
         }
 
@@ -205,6 +223,7 @@ internal static class Program
         CallerMode mode = CallerMode.Standard;
         bool modeSpecified = false;
         string? modelPath = null;
+        bool useFixedThreshold = false;
 
         for (int index = 0; index < args.Length; index++)
         {
@@ -220,6 +239,12 @@ internal static class Program
 
                 mode = parsedMode;
                 modeSpecified = true;
+                continue;
+            }
+
+            if (string.Equals(argument, "--fixed-threshold", StringComparison.OrdinalIgnoreCase))
+            {
+                useFixedThreshold = true;
                 continue;
             }
 
@@ -241,7 +266,7 @@ internal static class Program
             return false;
         }
 
-        options = new CallerOptions(mode, modelPath);
+        options = new CallerOptions(mode, modelPath, useFixedThreshold);
         error = null;
         return true;
     }
@@ -301,7 +326,12 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("其他选项：");
         Console.WriteLine("  --model <路径>      指定模型文件；Adaptive 模式可指定模型目录");
+        Console.WriteLine("  --fixed-threshold   忽略模型旁的阈值清单，使用配置里的固定阈值");
         Console.WriteLine("  -h, --help, /?      显示此帮助菜单");
+        Console.WriteLine();
+        Console.WriteLine("阈值说明：");
+        Console.WriteLine("  默认自动采用模型旁 *.threshold.json 中训练阶段校准出的推荐阈值。");
+        Console.WriteLine("  清单缺失或无效时回退到配置里的固定阈值，初始化后会打印实际生效的阈值。");
         Console.WriteLine();
         Console.WriteLine("交互说明：");
         Console.WriteLine("  模型初始化后可连续输入需要扫描的文件名。");
