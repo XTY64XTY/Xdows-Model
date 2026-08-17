@@ -75,7 +75,7 @@ namespace Xdows_Model_Invoker
 
         public static (bool isVirus, float probability) PredictWithMlNet(string modelPath, float[] features)
         {
-            using var session = new InferenceSession(modelPath);
+            using var session = new InferenceSession(modelPath, CreateSessionOptions());
             return RunInference(session, features, FileFeatures.FeatureCount, _standardThreshold);
         }
 
@@ -199,7 +199,7 @@ namespace Xdows_Model_Invoker
                 _adaptiveSession?.Dispose();
                 _proEnsemble = null;
                 _adaptiveSession = null;
-                _session = new InferenceSession(path);
+                _session = new InferenceSession(path, CreateSessionOptions());
                 _loadedModelPath = path;
                 _mode = mode;
                 _proFeatureDimension = null;
@@ -478,9 +478,18 @@ namespace Xdows_Model_Invoker
             }
         }
 
-        internal static float RunProbability(InferenceSession session, float[] features, int featureCount)
+        /// <summary>
+        /// 创建统一启用了全量图优化的 SessionOptions。batch=1 的树模型对 IntraOp 线程不敏感，
+        /// 提升 GraphOptimizationLevel 是性价比最高的运行时优化（语义保持）。
+        /// </summary>
+        internal static SessionOptions CreateSessionOptions()
         {
-            var featuresTensor = new DenseTensor<float>(new Memory<float>(features), new[] { 1, featureCount });
+            return new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
+        }
+
+internal static float RunProbability(InferenceSession session, float[] features, int featureCount)
+        {
+            var featuresTensor = new DenseTensor<float>(new Memory<float>(features, 0, featureCount), new[] { 1, featureCount });
             var labelTensor = new DenseTensor<bool>(new Memory<bool>(new bool[] { false }), new[] { 1, 1 });
 
             var inputs = new List<NamedOnnxValue>
