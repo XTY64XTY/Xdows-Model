@@ -15,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -92,8 +93,8 @@ namespace
               ModelPath(modelPath),
               Env(ORT_LOGGING_LEVEL_WARNING, "XdowsModelNative")
         {
-            Options.SetIntraOpNumThreads(1);
-            Options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
+Options.SetIntraOpNumThreads(1);
+            Options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
             if (Mode == XdowsModelNativeModeAdaptive)
             {
@@ -178,6 +179,27 @@ namespace
         return b >= 48 && b <= 57;
     }
 
+    // 字节分类查表（与 Managed ByteAnalysisHelper.ByteClass 位布局完全一致）：
+    // bit0=highByte(>=0x80) bit1=whitespace bit2=printable bit3=letter bit4=digit
+    constexpr std::array<std::uint8_t, 256> kByteClass = [] {
+        std::array<std::uint8_t, 256> table{};
+        for (int i = 0; i < 256; i++)
+        {
+            std::uint8_t b = static_cast<std::uint8_t>(i);
+            std::uint8_t c = 0;
+            if (b >= 0x80) c |= 0x01;
+            if (b == 9 || b == 10 || b == 13 || b == 32) c |= 0x02;
+            if (b >= 32 && b <= 126)
+            {
+                c |= 0x04;
+                if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122)) c |= 0x08;
+                else if (b >= 48 && b <= 57) c |= 0x10;
+            }
+            table[i] = c;
+        }
+        return table;
+    }();
+
     std::uint16_t ReadUInt16(const std::vector<std::uint8_t>& bytes, size_t offset)
     {
         if (offset + 2 > bytes.size())
@@ -251,62 +273,82 @@ namespace
         return stream.read(reinterpret_cast<char*>(bytes.data()), size).good();
     }
 
-    CommonStats ComputeCommonStats(const std::uint8_t* data, size_t length)
+    // T4：分区域读取。只读 head（前 min(size, kFlashRegionSize)）+ tail（最后 min(size, kFlashRegionSize)）。
+    // 小文件（size <= kFlashRegionSize）tail 留空，特征层复用 head（数学等价：tail 区域 == head 区域）。
+    // 与 Managed FlashFeatureExtractor.ExtractFeatures(filePath) 语义一致（delta=0.00 已验证）。
+    bool ReadFileRegions(const std::filesystem::path& path,
+                         std::vector<std::uint8_t>& head,
+                         std::vector<std::uint8_t>& tail,
+                         size_t& totalSize)
     {
-        CommonStats stats;
-        int currentZeroRun = 0;
-        int currentNonZeroRun = 0;
+        std::ifstream stream(path, std::ios::binary | std::ios::ate);
+        if (!stream)
+            return false;
 
-        for (size_t i = 0; i < length; i++)
+        std::streamsize size = stream.tellg();
+        if (size <= 0)
+            return false;
+
+        totalSize = static_cast<size_t>(size);
+        size_t headLength = std::min(totalSize, kFlashRegionSize);
+
+        stream.seekg(0, std::ios::beg);
+        head.resize(headLength);
+        if (!stream.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(headLength)).good())
+            return false;
+
+        if (totalSize > kFlashRegionSize)
         {
-            std::uint8_t b = data[i];
-            stats.Counts[b]++;
-
-            if (b >= 0x80)
-                stats.HighByteCount++;
-
-            if (IsWhitespace(b))
-                stats.WhitespaceCount++;
-
-            if (IsPrintable(b))
-            {
-                stats.PrintableCount++;
-                if (IsLetter(b))
-                    stats.LetterCount++;
-                else if (IsDigit(b))
-                    stats.DigitCount++;
-            }
-            else
-            {
-                stats.ControlCount++;
-            }
-
-            if (b == 0)
-            {
-                if (currentNonZeroRun > 0)
-                {
-                    stats.NonZeroRunCount++;
-                    stats.TotalNonZeroRunLength += currentNonZeroRun;
-                    stats.MaxNonZeroRun = std::max(stats.MaxNonZeroRun, currentNonZeroRun);
-                    currentNonZeroRun = 0;
-                }
-
-                currentZeroRun++;
-                stats.MaxZeroRun = std::max(stats.MaxZeroRun, currentZeroRun);
-            }
-            else
-            {
-                if (currentZeroRun > 0)
-                {
-                    stats.ZeroRunCount++;
-                    stats.TotalZeroRunLength += currentZeroRun;
-                    currentZeroRun = 0;
-                }
-
-                currentNonZeroRun++;
-            }
+            size_t tailPos = totalSize - kFlashRegionSize;
+            stream.seekg(static_cast<std::streamoff>(tailPos), std::ios::beg);
+            tail.resize(kFlashRegionSize);
+            if (!stream.read(reinterpret_cast<char*>(tail.data()), static_cast<std::streamsize>(kFlashRegionSize)).good())
+                return false;
         }
 
+        return true;
+    }
+
+    inline void AccumulateStats(CommonStats& stats, std::uint8_t b, std::uint8_t cls,
+                                int& currentZeroRun, int& currentNonZeroRun)
+    {
+        stats.Counts[b]++;
+        stats.HighByteCount += cls & 1;
+        stats.WhitespaceCount += (cls >> 1) & 1;
+        int printable = (cls >> 2) & 1;
+        stats.PrintableCount += printable;
+        stats.ControlCount += printable ^ 1;
+        stats.LetterCount += (cls >> 3) & printable;
+        stats.DigitCount += (cls >> 4) & printable;
+
+        if (b == 0)
+        {
+            if (currentNonZeroRun > 0)
+            {
+                stats.NonZeroRunCount++;
+                stats.TotalNonZeroRunLength += currentNonZeroRun;
+                stats.MaxNonZeroRun = std::max(stats.MaxNonZeroRun, currentNonZeroRun);
+                currentNonZeroRun = 0;
+            }
+
+            currentZeroRun++;
+            stats.MaxZeroRun = std::max(stats.MaxZeroRun, currentZeroRun);
+        }
+        else
+        {
+            if (currentZeroRun > 0)
+            {
+                stats.ZeroRunCount++;
+                stats.TotalZeroRunLength += currentZeroRun;
+                currentZeroRun = 0;
+            }
+
+            currentNonZeroRun++;
+        }
+    }
+
+    inline void FinalizeRuns(CommonStats& stats, int& currentZeroRun, int& currentNonZeroRun)
+    {
         if (currentZeroRun > 0)
         {
             stats.ZeroRunCount++;
@@ -319,7 +361,21 @@ namespace
             stats.TotalNonZeroRunLength += currentNonZeroRun;
             stats.MaxNonZeroRun = std::max(stats.MaxNonZeroRun, currentNonZeroRun);
         }
+    }
 
+    CommonStats ComputeCommonStats(const std::uint8_t* data, size_t length)
+    {
+        CommonStats stats;
+        int currentZeroRun = 0;
+        int currentNonZeroRun = 0;
+
+        for (size_t i = 0; i < length; i++)
+        {
+            std::uint8_t b = data[i];
+            AccumulateStats(stats, b, kByteClass[b], currentZeroRun, currentNonZeroRun);
+        }
+
+        FinalizeRuns(stats, currentZeroRun, currentNonZeroRun);
         return stats;
     }
 
@@ -339,6 +395,233 @@ namespace
             entropy -= p * std::log2(p);
         }
         return entropy;
+    }
+
+    // 区域 4096 块熵（等价旧 ComputeBlockEntropyStats；熵只依赖频数，无需逐块 CommonStats）
+    void ComputeRegionBlockEntropy(const std::uint8_t* data, size_t length,
+                                   size_t blockSize, size_t maxRegionSize,
+                                   double& minEntropy, double& maxEntropy,
+                                   double& meanEntropy, double& variance)
+    {
+        minEntropy = 0;
+        maxEntropy = 0;
+        meanEntropy = 0;
+        variance = 0;
+
+        size_t analysisLength = std::min(length, maxRegionSize);
+        if (analysisLength == 0 || blockSize == 0)
+            return;
+
+        size_t blockCount = (analysisLength + blockSize - 1) / blockSize;
+        std::array<long long, 256> counts{};
+        size_t blockStart = 0;
+        double totalEntropy = 0;
+        double totalEntropySq = 0;
+        minEntropy = std::numeric_limits<double>::max();
+        maxEntropy = std::numeric_limits<double>::lowest();
+
+        for (size_t i = 0; i < analysisLength; i++)
+        {
+            counts[data[i]]++;
+            if ((i + 1) % blockSize == 0 || i == analysisLength - 1)
+            {
+                size_t currentBlockSize = (i + 1) - blockStart;
+                double blockEntropy = ComputeEntropy(counts, currentBlockSize);
+
+                minEntropy = std::min(minEntropy, blockEntropy);
+                maxEntropy = std::max(maxEntropy, blockEntropy);
+                totalEntropy += blockEntropy;
+                totalEntropySq += blockEntropy * blockEntropy;
+
+                counts.fill(0);
+                blockStart = i + 1;
+            }
+        }
+
+        meanEntropy = totalEntropy / blockCount;
+        double var = (totalEntropySq / blockCount) - (meanEntropy * meanEntropy);
+        variance = var < 0 ? 0 : var;
+    }
+
+    struct UnifiedScanResult
+    {
+        CommonStats Full;
+        CommonStats Head;
+        double MinBlockEntropy = 0;
+        double MaxBlockEntropy = 0;
+        double MeanBlockEntropy = 0;
+        double BlockEntropyVariance = 0;
+        double MinPosition = 0;
+        double MaxPosition = 0;
+        double FirstEntropy = 0;
+        double LastEntropy = 0;
+        double HeadMin = 0;
+        double HeadMax = 0;
+        double HeadMean = 0;
+        double HeadVar = 0;
+        double TailMin = 0;
+        double TailMax = 0;
+        double TailMean = 0;
+        double TailVar = 0;
+    };
+
+    UnifiedScanResult ComputeUnifiedScan(const std::uint8_t* data, size_t length,
+                                         bool needFull, bool needFlash)
+    {
+        UnifiedScanResult result;
+        if (length == 0)
+            return result;
+
+        size_t headLength = std::min(length, kFlashRegionSize);
+        size_t tailStart = length > kFlashRegionSize ? length - kFlashRegionSize : 0;
+        size_t tailLength = length - tailStart;
+        size_t headAnalysisLen = std::min(length, kBlockEntropyRegionSize);
+        size_t tailAnalysisLen = std::min(tailLength, kBlockEntropyRegionSize);
+        size_t tailAnalysisEnd = tailStart + tailAnalysisLen;
+
+        int fullZeroRun = 0;
+        int fullNonZeroRun = 0;
+        int headZeroRun = 0;
+        int headNonZeroRun = 0;
+
+        std::array<long long, 256> block256Counts{};
+        size_t block256Index = 0;
+        size_t block256Count = (length + 255) / 256;
+        double minEntropy = std::numeric_limits<double>::max();
+        double maxEntropy = std::numeric_limits<double>::lowest();
+        double totalEntropy = 0;
+        double totalEntropySq = 0;
+        size_t minIndex = 0;
+        size_t maxIndex = 0;
+        double firstEntropy = 0;
+        double lastEntropy = 0;
+
+        std::array<long long, 256> headCounts{};
+        size_t headBlockIndex = 0;
+        size_t headBlockCount = (headAnalysisLen + 4095) / 4096;
+        double headMin = std::numeric_limits<double>::max();
+        double headMax = std::numeric_limits<double>::lowest();
+        double headTotal = 0;
+        double headTotalSq = 0;
+
+        std::array<long long, 256> tailCounts{};
+        size_t tailBlockIndex = 0;
+        size_t tailBlockCount = (tailAnalysisLen + 4095) / 4096;
+        double tailMin = std::numeric_limits<double>::max();
+        double tailMax = std::numeric_limits<double>::lowest();
+        double tailTotal = 0;
+        double tailTotalSq = 0;
+
+        for (size_t i = 0; i < length; i++)
+        {
+            std::uint8_t b = data[i];
+            std::uint8_t cls = kByteClass[b];
+
+            if (needFull)
+            {
+                AccumulateStats(result.Full, b, cls, fullZeroRun, fullNonZeroRun);
+
+                block256Counts[b]++;
+                if ((i + 1) % 256 == 0 || i == length - 1)
+                {
+                    size_t blockSize = (i + 1) - block256Index * 256;
+                    double blockEntropy = ComputeEntropy(block256Counts, blockSize);
+                    if (block256Index == 0)
+                        firstEntropy = blockEntropy;
+                    if (block256Index == block256Count - 1)
+                        lastEntropy = blockEntropy;
+                    if (blockEntropy < minEntropy)
+                    {
+                        minEntropy = blockEntropy;
+                        minIndex = block256Index;
+                    }
+                    if (blockEntropy > maxEntropy)
+                    {
+                        maxEntropy = blockEntropy;
+                        maxIndex = block256Index;
+                    }
+                    totalEntropy += blockEntropy;
+                    totalEntropySq += blockEntropy * blockEntropy;
+                    block256Counts.fill(0);
+                    block256Index++;
+                }
+            }
+
+            if (needFlash && i < headLength)
+                AccumulateStats(result.Head, b, cls, headZeroRun, headNonZeroRun);
+
+            if (i < headAnalysisLen)
+            {
+                headCounts[b]++;
+                if ((i + 1) % 4096 == 0 || i == headAnalysisLen - 1)
+                {
+                    size_t blockSize = (i + 1) - headBlockIndex * 4096;
+                    double blockEntropy = ComputeEntropy(headCounts, blockSize);
+                    if (blockEntropy < headMin)
+                        headMin = blockEntropy;
+                    if (blockEntropy > headMax)
+                        headMax = blockEntropy;
+                    headTotal += blockEntropy;
+                    headTotalSq += blockEntropy * blockEntropy;
+                    headCounts.fill(0);
+                    headBlockIndex++;
+                }
+            }
+
+            if (needFlash && i >= tailStart && i < tailAnalysisEnd)
+            {
+                size_t local = i - tailStart;
+                tailCounts[b]++;
+                if ((local + 1) % 4096 == 0 || local == tailAnalysisLen - 1)
+                {
+                    size_t blockSize = (local + 1) - tailBlockIndex * 4096;
+                    double blockEntropy = ComputeEntropy(tailCounts, blockSize);
+                    if (blockEntropy < tailMin)
+                        tailMin = blockEntropy;
+                    if (blockEntropy > tailMax)
+                        tailMax = blockEntropy;
+                    tailTotal += blockEntropy;
+                    tailTotalSq += blockEntropy * blockEntropy;
+                    tailCounts.fill(0);
+                    tailBlockIndex++;
+                }
+            }
+        }
+
+        if (needFull)
+            FinalizeRuns(result.Full, fullZeroRun, fullNonZeroRun);
+        if (needFlash)
+            FinalizeRuns(result.Head, headZeroRun, headNonZeroRun);
+
+        if (needFull)
+        {
+            result.MinBlockEntropy = minEntropy;
+            result.MaxBlockEntropy = maxEntropy;
+            result.MeanBlockEntropy = totalEntropy / block256Count;
+            double var = (totalEntropySq / block256Count) - (result.MeanBlockEntropy * result.MeanBlockEntropy);
+            result.BlockEntropyVariance = var < 0 ? 0 : var;
+            result.MinPosition = block256Count > 1 ? static_cast<double>(minIndex) / (block256Count - 1) : 0;
+            result.MaxPosition = block256Count > 1 ? static_cast<double>(maxIndex) / (block256Count - 1) : 0;
+            result.FirstEntropy = firstEntropy;
+            result.LastEntropy = lastEntropy;
+        }
+
+        result.HeadMin = headMin;
+        result.HeadMax = headMax;
+        result.HeadMean = headTotal / headBlockCount;
+        double headVar = (headTotalSq / headBlockCount) - (result.HeadMean * result.HeadMean);
+        result.HeadVar = headVar < 0 ? 0 : headVar;
+
+        if (needFlash)
+        {
+            result.TailMin = tailMin;
+            result.TailMax = tailMax;
+            result.TailMean = tailTotal / tailBlockCount;
+            double tailVar = (tailTotalSq / tailBlockCount) - (result.TailMean * result.TailMean);
+            result.TailVar = tailVar < 0 ? 0 : tailVar;
+        }
+
+        return result;
     }
 
     double ComputeRegionEntropy(const std::vector<std::uint8_t>& bytes, size_t start, size_t length)
@@ -422,112 +705,6 @@ namespace
         extendedAsciiRatio = static_cast<double>(extendedAscii) / total;
     }
 
-    void ComputeBlockEntropyStats(
-        const std::uint8_t* data,
-        size_t length,
-        size_t blockSize,
-        size_t maxRegionSize,
-        double& minEntropy,
-        double& maxEntropy,
-        double& meanEntropy,
-        double& variance)
-    {
-        minEntropy = 0;
-        maxEntropy = 0;
-        meanEntropy = 0;
-        variance = 0;
-
-        size_t analysisLength = std::min(length, maxRegionSize);
-        if (analysisLength == 0 || blockSize == 0)
-            return;
-
-        size_t blockCount = (analysisLength + blockSize - 1) / blockSize;
-        double totalEntropy = 0;
-        double totalEntropySq = 0;
-        minEntropy = std::numeric_limits<double>::max();
-        maxEntropy = std::numeric_limits<double>::lowest();
-
-        for (size_t blockIndex = 0; blockIndex < blockCount; blockIndex++)
-        {
-            size_t start = blockIndex * blockSize;
-            size_t end = std::min(start + blockSize, analysisLength);
-            size_t currentBlockSize = end - start;
-            CommonStats blockStats = ComputeCommonStats(data + start, currentBlockSize);
-            double blockEntropy = ComputeEntropy(blockStats.Counts, currentBlockSize);
-
-            minEntropy = std::min(minEntropy, blockEntropy);
-            maxEntropy = std::max(maxEntropy, blockEntropy);
-            totalEntropy += blockEntropy;
-            totalEntropySq += blockEntropy * blockEntropy;
-        }
-
-        meanEntropy = totalEntropy / blockCount;
-        double var = (totalEntropySq / blockCount) - (meanEntropy * meanEntropy);
-        variance = var < 0 ? 0 : var;
-    }
-
-    void ComputeStandardBlockEntropy(
-        const std::vector<std::uint8_t>& bytes,
-        double& minEntropy,
-        double& maxEntropy,
-        double& meanEntropy,
-        double& variance,
-        double& minPosition,
-        double& maxPosition,
-        double& firstEntropy,
-        double& lastEntropy)
-    {
-        constexpr size_t blockSize = 256;
-        size_t blockCount = (bytes.size() + blockSize - 1) / blockSize;
-        if (blockCount == 0)
-        {
-            minEntropy = maxEntropy = meanEntropy = variance = minPosition = maxPosition = firstEntropy = lastEntropy = 0;
-            return;
-        }
-
-        minEntropy = std::numeric_limits<double>::max();
-        maxEntropy = std::numeric_limits<double>::lowest();
-        double totalEntropy = 0;
-        double totalEntropySq = 0;
-        size_t minIndex = 0;
-        size_t maxIndex = 0;
-
-        for (size_t blockIndex = 0; blockIndex < blockCount; blockIndex++)
-        {
-            size_t start = blockIndex * blockSize;
-            size_t end = std::min(start + blockSize, bytes.size());
-            size_t currentBlockSize = end - start;
-            CommonStats blockStats = ComputeCommonStats(bytes.data() + start, currentBlockSize);
-            double blockEntropy = ComputeEntropy(blockStats.Counts, currentBlockSize);
-
-            if (blockIndex == 0)
-                firstEntropy = blockEntropy;
-            if (blockIndex == blockCount - 1)
-                lastEntropy = blockEntropy;
-
-            if (blockEntropy < minEntropy)
-            {
-                minEntropy = blockEntropy;
-                minIndex = blockIndex;
-            }
-
-            if (blockEntropy > maxEntropy)
-            {
-                maxEntropy = blockEntropy;
-                maxIndex = blockIndex;
-            }
-
-            totalEntropy += blockEntropy;
-            totalEntropySq += blockEntropy * blockEntropy;
-        }
-
-        meanEntropy = totalEntropy / blockCount;
-        double var = (totalEntropySq / blockCount) - (meanEntropy * meanEntropy);
-        variance = var < 0 ? 0 : var;
-        minPosition = blockCount > 1 ? static_cast<double>(minIndex) / (blockCount - 1) : 0;
-        maxPosition = blockCount > 1 ? static_cast<double>(maxIndex) / (blockCount - 1) : 0;
-    }
-
     void ParsePeHeader(const std::vector<std::uint8_t>& bytes, float* values)
     {
         values[0] = 0;
@@ -599,11 +776,11 @@ namespace
         return true;
     }
 
-    void AppendStandardFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
+    void AppendStandardFeaturesFromUnified(const std::vector<std::uint8_t>& bytes, const UnifiedScanResult& unified, std::vector<float>& features)
     {
         features.reserve(features.size() + kStandardFeatureCount);
 
-        CommonStats stats = ComputeCommonStats(bytes.data(), bytes.size());
+        const CommonStats& stats = unified.Full;
         double total = static_cast<double>(bytes.size());
 
         for (int i = 0; i < 256; i++)
@@ -632,24 +809,14 @@ namespace
         }
 
         double entropy = ComputeEntropy(stats.Counts, bytes.size());
-        double minBlockEntropy = 0;
-        double maxBlockEntropy = 0;
-        double meanBlockEntropy = 0;
-        double blockEntropyVariance = 0;
-        double minEntropyBlockPosition = 0;
-        double maxEntropyBlockPosition = 0;
-        double firstBlockEntropy = 0;
-        double lastBlockEntropy = 0;
-        ComputeStandardBlockEntropy(
-            bytes,
-            minBlockEntropy,
-            maxBlockEntropy,
-            meanBlockEntropy,
-            blockEntropyVariance,
-            minEntropyBlockPosition,
-            maxEntropyBlockPosition,
-            firstBlockEntropy,
-            lastBlockEntropy);
+        double minBlockEntropy = unified.MinBlockEntropy;
+        double maxBlockEntropy = unified.MaxBlockEntropy;
+        double meanBlockEntropy = unified.MeanBlockEntropy;
+        double blockEntropyVariance = unified.BlockEntropyVariance;
+        double minEntropyBlockPosition = unified.MinPosition;
+        double maxEntropyBlockPosition = unified.MaxPosition;
+        double firstBlockEntropy = unified.FirstEntropy;
+        double lastBlockEntropy = unified.LastEntropy;
 
         double meanByteValue = 0;
         double byteValueVariance = 0;
@@ -662,19 +829,10 @@ namespace
         double extendedAsciiRatio = 0;
         ComputeByteRangeRatios(stats.Counts, bytes.size(), lowByteRatio, printableAsciiRatio, extendedAsciiRatio);
 
-        double headBlockEntropyMin = 0;
-        double headBlockEntropyMax = 0;
-        double headBlockEntropyMean = 0;
-        double headBlockEntropyVar = 0;
-        ComputeBlockEntropyStats(
-            bytes.data(),
-            bytes.size(),
-            4096,
-            kBlockEntropyRegionSize,
-            headBlockEntropyMin,
-            headBlockEntropyMax,
-            headBlockEntropyMean,
-            headBlockEntropyVar);
+        double headBlockEntropyMin = unified.HeadMin;
+        double headBlockEntropyMax = unified.HeadMax;
+        double headBlockEntropyMean = unified.HeadMean;
+        double headBlockEntropyVar = unified.HeadVar;
 
         float peValues[5]{};
         ParsePeHeader(bytes, peValues);
@@ -725,15 +883,19 @@ namespace
         features.push_back(static_cast<float>(headBlockEntropyVar));
     }
 
-    void AppendFlashFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
+    void AppendStandardFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
+    {
+        UnifiedScanResult unified = ComputeUnifiedScan(bytes.data(), bytes.size(), true, false);
+        AppendStandardFeaturesFromUnified(bytes, unified, features);
+    }
+
+    void AppendFlashFeatureValues(const CommonStats& stats, size_t headLength, size_t totalSize,
+                                  double hMin, double hMax, double hMean, double hVar,
+                                  double tMin, double tMax, double tMean, double tVar,
+                                  float* peValues, std::vector<float>& features)
     {
         features.reserve(features.size() + kFlashFeatureCount);
 
-        size_t headLength = std::min(bytes.size(), kFlashRegionSize);
-        size_t tailStart = bytes.size() > kFlashRegionSize ? bytes.size() - kFlashRegionSize : 0;
-        size_t tailLength = bytes.size() - tailStart;
-
-        CommonStats stats = ComputeCommonStats(bytes.data(), headLength);
         double total = static_cast<double>(headLength);
 
         int uniqueBytes = 0;
@@ -766,22 +928,7 @@ namespace
         double extendedAsciiRatio = 0;
         ComputeByteRangeRatios(stats.Counts, headLength, lowByteRatio, printableAsciiRatio, extendedAsciiRatio);
 
-        double hMin = 0;
-        double hMax = 0;
-        double hMean = 0;
-        double hVar = 0;
-        ComputeBlockEntropyStats(bytes.data(), headLength, 4096, kBlockEntropyRegionSize, hMin, hMax, hMean, hVar);
-
-        double tMin = 0;
-        double tMax = 0;
-        double tMean = 0;
-        double tVar = 0;
-        ComputeBlockEntropyStats(bytes.data() + tailStart, tailLength, 4096, kBlockEntropyRegionSize, tMin, tMax, tMean, tVar);
-
-        float peValues[5]{};
-        ParsePeHeader(bytes, peValues);
-
-        features.push_back(static_cast<float>(std::log(static_cast<double>(bytes.size()) + 1.0)));
+        features.push_back(static_cast<float>(std::log(static_cast<double>(totalSize) + 1.0)));
         features.push_back(static_cast<float>(ComputeEntropy(stats.Counts, headLength)));
         features.push_back(static_cast<float>(total > 0 ? static_cast<double>(stats.Counts[0]) / total : 0));
         features.push_back(static_cast<float>(total > 0 ? static_cast<double>(stats.HighByteCount) / total : 0));
@@ -822,8 +969,80 @@ namespace
         features.push_back(static_cast<float>(tMean));
         features.push_back(static_cast<float>(tVar));
 
-        for (float peValue : peValues)
-            features.push_back(peValue);
+        for (int i = 0; i < 5; i++)
+            features.push_back(peValues[i]);
+    }
+
+    void AppendFlashFeaturesFromUnified(const std::vector<std::uint8_t>& bytes, const UnifiedScanResult& unified, std::vector<float>& features)
+    {
+        size_t headLength = std::min(bytes.size(), kFlashRegionSize);
+
+        float peValues[5]{};
+        ParsePeHeader(bytes, peValues);
+
+        AppendFlashFeatureValues(
+            unified.Head,
+            headLength,
+            bytes.size(),
+            unified.HeadMin,
+            unified.HeadMax,
+            unified.HeadMean,
+            unified.HeadVar,
+            unified.TailMin,
+            unified.TailMax,
+            unified.TailMean,
+            unified.TailVar,
+            peValues,
+            features);
+    }
+
+    // T4：从分区域读取的 head/tail 计算 Flash 特征（数学等价于全量统一扫描：
+    // stats=head 区域统计；h*=head 4096 块熵；t*=tail 4096 块熵；小文件 tail 复用 head）。
+    void AppendFlashFeaturesFromRegions(const std::vector<std::uint8_t>& head,
+                                        const std::vector<std::uint8_t>& tail,
+                                        size_t totalSize,
+                                        std::vector<float>& features)
+    {
+        size_t headLength = head.size();
+
+        CommonStats stats = ComputeCommonStats(head.data(), headLength);
+
+        double hMin = 0;
+        double hMax = 0;
+        double hMean = 0;
+        double hVar = 0;
+        ComputeRegionBlockEntropy(head.data(), headLength, 4096, kBlockEntropyRegionSize, hMin, hMax, hMean, hVar);
+
+        double tMin = hMin;
+        double tMax = hMax;
+        double tMean = hMean;
+        double tVar = hVar;
+        if (!tail.empty())
+            ComputeRegionBlockEntropy(tail.data(), tail.size(), 4096, kBlockEntropyRegionSize, tMin, tMax, tMean, tVar);
+
+        float peValues[5]{};
+        ParsePeHeader(head, peValues);
+
+        AppendFlashFeatureValues(
+            stats,
+            headLength,
+            totalSize,
+            hMin,
+            hMax,
+            hMean,
+            hVar,
+            tMin,
+            tMax,
+            tMean,
+            tVar,
+            peValues,
+            features);
+    }
+
+    void AppendFlashFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
+    {
+        UnifiedScanResult unified = ComputeUnifiedScan(bytes.data(), bytes.size(), false, true);
+        AppendFlashFeaturesFromUnified(bytes, unified, features);
     }
 
     bool IsProFeatureCount(int featureCount)
@@ -1084,13 +1303,14 @@ namespace
         case XdowsModelNativeModeFlash:
             AppendFlashFeatures(bytes, features);
             return features.size() == kFlashFeatureCount;
-        case XdowsModelNativeModePro:
+case XdowsModelNativeModePro:
         {
             if (featureCount != kProHybridFeatureCount && featureCount != 4)
                 return false;
 
-            AppendStandardFeatures(bytes, features);
-            AppendFlashFeatures(bytes, features);
+            UnifiedScanResult unified = ComputeUnifiedScan(bytes.data(), bytes.size(), true, true);
+            AppendStandardFeaturesFromUnified(bytes, unified, features);
+            AppendFlashFeaturesFromUnified(bytes, unified, features);
             AppendProRawStatFeatures(bytes, features);
             AppendProStructuralFeatures(bytes, features);
             return features.size() == static_cast<size_t>(kProHybridFeatureCount);
@@ -1329,23 +1549,48 @@ namespace
             kStandardFeatureCount,
             kStandardFeatureCount + kFlashFeatureCount,
             kStandardFeatureCount + kFlashFeatureCount + kProRawStatFeatureCount };
+
+        // T5：与 Managed ProEnsembleSession.Parallel.For 对齐，4 个分支 session 并行推理。
+        // 每分支独立 Ort::Session（可并发 Run），error 线程局部，避免数据竞争。
         std::vector<float> fusionFeatures(4, 0.0f);
+        std::vector<std::future<bool>> futures;
+        std::vector<std::wstring> branchErrors(session->ProBranchSessions.size());
+        std::vector<float> branchProbabilities(session->ProBranchSessions.size(), 0.0f);
+        futures.reserve(session->ProBranchSessions.size());
+
         for (size_t i = 0; i < session->ProBranchSessions.size(); i++)
         {
             int count = session->ProBranchFeatureCounts[i];
-            std::vector<float> branchFeatures(
-                features.begin() + static_cast<std::ptrdiff_t>(offsets[i]),
-                features.begin() + static_cast<std::ptrdiff_t>(offsets[i] + count));
-            float branchProbability = 0;
-            if (!RunOnnxSession(session->ProBranchSessions[i].get(), count, branchFeatures, branchProbability, error))
+            futures.push_back(std::async(std::launch::async, [&, i, count]() -> bool
+            {
+                std::vector<float> branchFeatures(
+                    features.begin() + static_cast<std::ptrdiff_t>(offsets[i]),
+                    features.begin() + static_cast<std::ptrdiff_t>(offsets[i] + count));
+                return RunOnnxSession(session->ProBranchSessions[i].get(), count, branchFeatures,
+                                      branchProbabilities[i], branchErrors[i]);
+            }));
+        }
+
+        for (size_t i = 0; i < futures.size(); i++)
+        {
+            bool ok = futures[i].get();
+            if (!ok && error.empty() && !branchErrors[i].empty())
+                error = branchErrors[i];
+            if (!ok)
                 return false;
-            fusionFeatures[i] = branchProbability / 100.0f;
+            fusionFeatures[i] = branchProbabilities[i] / 100.0f;
         }
 
         return RunOnnxSession(session->Session.get(), 4, fusionFeatures, probability, error);
     }
 
-    bool RunAdaptive(NativeSession* session, const std::vector<std::uint8_t>& bytes,
+// T4：Adaptive 闪存阶段用分区域读取（只读 head+tail），escalate 才全量读。
+    // 与 Managed AdaptiveModelSession.ScanFile 语义一致（flash 阶段 FlashFeatureExtractor.ExtractFeatures(filePath)）。
+    bool RunAdaptive(NativeSession* session,
+                     const std::filesystem::path& path,
+                     const std::vector<std::uint8_t>& head,
+                     const std::vector<std::uint8_t>& tail,
+                     size_t totalSize,
                      float& probability, int& finalMode, std::wstring& error)
     {
         if (session == nullptr || session->AdaptiveFlash == nullptr ||
@@ -1356,13 +1601,20 @@ namespace
         }
 
         std::vector<float> flashFeatures;
-        AppendFlashFeatures(bytes, flashFeatures);
+        AppendFlashFeaturesFromRegions(head, tail, totalSize, flashFeatures);
         if (!RunOnnx(session->AdaptiveFlash.get(), flashFeatures, probability, error))
             return false;
         if (probability <= 100.0f - ThresholdForMode(XdowsModelNativeModeFlash))
         {
             finalMode = XdowsModelNativeModeFlash;
             return true;
+        }
+
+        std::vector<std::uint8_t> bytes;
+        if (!ReadAllBytes(path, bytes))
+        {
+            error = L"read-failed";
+            return false;
         }
 
         std::vector<float> standardFeatures;
@@ -1417,6 +1669,156 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
     }
 }
 
+// T4：Flash/Adaptive 走分区域读取（只读 head+tail），Standard/Pro 保持全量读取。
+    bool ScanViaRegions(NativeSession* nativeSession,
+                        const std::filesystem::path& path,
+                        XDOWS_MODEL_NATIVE_SCAN_RESULT* result)
+    {
+        std::vector<std::uint8_t> head;
+        std::vector<std::uint8_t> tail;
+        size_t totalSize = 0;
+        if (!ReadFileRegions(path, head, tail, totalSize))
+        {
+            SetError(result, XdowsModelNativeStatusInternalError, L"read-failed");
+            return false;
+        }
+
+        if (ContainsAscii(head, "EICAR-STANDARD-ANTIVIRUS-TEST-FILE") ||
+            ContainsAscii(tail, "EICAR-STANDARD-ANTIVIRUS-TEST-FILE"))
+        {
+            result->Status = XdowsModelNativeStatusOk;
+            result->IsThreat = 1;
+            result->Probability = 100.0f;
+            result->DetectionName = DuplicateString(L"Xdows.Model.EICAR");
+            return true;
+        }
+
+        if (!IsPeFile(head))
+        {
+            result->Status = XdowsModelNativeStatusOk;
+            result->IsThreat = 0;
+            result->Probability = 0.0f;
+            return true;
+        }
+
+        float probability = 0;
+        int decisionMode = nativeSession->Mode;
+        std::wstring error;
+        if (nativeSession->Mode == XdowsModelNativeModeAdaptive)
+        {
+            if (!RunAdaptive(nativeSession, path, head, tail, totalSize, probability, decisionMode, error))
+            {
+                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"adaptive-run-failed" : error);
+                return false;
+            }
+        }
+        else
+        {
+            std::vector<float> features;
+            AppendFlashFeaturesFromRegions(head, tail, totalSize, features);
+            if (!RunOnnx(nativeSession, features, probability, error))
+            {
+                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error);
+                return false;
+            }
+        }
+
+        result->Status = XdowsModelNativeStatusOk;
+        result->Probability = probability;
+        if (probability >= ThresholdForMode(decisionMode))
+        {
+            result->IsThreat = 1;
+            result->DetectionName = DuplicateString(
+                L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
+                std::to_wstring(static_cast<int>(probability)));
+        }
+        else
+        {
+            result->IsThreat = 0;
+        }
+
+        return true;
+    }
+
+    bool ScanViaFullRead(NativeSession* nativeSession,
+                         const std::filesystem::path& path,
+                         XDOWS_MODEL_NATIVE_SCAN_RESULT* result)
+    {
+        std::vector<std::uint8_t> bytes;
+        if (!ReadAllBytes(path, bytes))
+        {
+            SetError(result, XdowsModelNativeStatusInternalError, L"read-failed");
+            return false;
+        }
+
+        if (ContainsAscii(bytes, "EICAR-STANDARD-ANTIVIRUS-TEST-FILE"))
+        {
+            result->Status = XdowsModelNativeStatusOk;
+            result->IsThreat = 1;
+            result->Probability = 100.0f;
+            result->DetectionName = DuplicateString(L"Xdows.Model.EICAR");
+            return true;
+        }
+
+        if (!IsPeFile(bytes))
+        {
+            result->Status = XdowsModelNativeStatusOk;
+            result->IsThreat = 0;
+            result->Probability = 0.0f;
+            return true;
+        }
+
+        float probability = 0;
+        int decisionMode = nativeSession->Mode;
+        std::wstring error;
+        if (nativeSession->Mode == XdowsModelNativeModeAdaptive)
+        {
+            std::vector<std::uint8_t> head;
+            std::vector<std::uint8_t> tail;
+            size_t totalSize = bytes.size();
+            size_t headLength = std::min(totalSize, kFlashRegionSize);
+            head.assign(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(headLength));
+            if (totalSize > kFlashRegionSize)
+                tail.assign(bytes.end() - static_cast<std::ptrdiff_t>(kFlashRegionSize), bytes.end());
+
+            if (!RunAdaptive(nativeSession, path, head, tail, totalSize, probability, decisionMode, error))
+            {
+                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"adaptive-run-failed" : error);
+                return false;
+            }
+        }
+        else
+        {
+            std::vector<float> features;
+            if (!ExtractFeaturesForMode(nativeSession->Mode, nativeSession->FeatureCount, bytes, features))
+            {
+                SetError(result, XdowsModelNativeStatusUnsupportedFile, L"feature-extraction-failed");
+                return false;
+            }
+            if (!RunOnnx(nativeSession, features, probability, error))
+            {
+                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error);
+                return false;
+            }
+        }
+
+        result->Status = XdowsModelNativeStatusOk;
+        result->Probability = probability;
+        if (probability >= ThresholdForMode(decisionMode))
+        {
+            result->IsThreat = 1;
+            result->DetectionName = DuplicateString(
+                L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
+                std::to_wstring(static_cast<int>(probability)));
+        }
+        else
+        {
+            result->IsThreat = 0;
+        }
+
+        return true;
+    }
+
 extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeScanFile(
     void* session,
     const wchar_t* filePath,
@@ -1435,71 +1837,18 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeScanFile(
         return XdowsModelNativeStatusFileNotFound;
     }
 
-    std::vector<std::uint8_t> bytes;
-    if (!ReadAllBytes(path, bytes))
+    bool ok;
+    if (nativeSession->Mode == XdowsModelNativeModeStandard ||
+        nativeSession->Mode == XdowsModelNativeModePro)
     {
-        SetError(result, XdowsModelNativeStatusInternalError, L"read-failed");
-        return XdowsModelNativeStatusInternalError;
-    }
-
-    if (ContainsAscii(bytes, "EICAR-STANDARD-ANTIVIRUS-TEST-FILE"))
-    {
-        result->Status = XdowsModelNativeStatusOk;
-        result->IsThreat = 1;
-        result->Probability = 100.0f;
-        result->DetectionName = DuplicateString(L"Xdows.Model.EICAR");
-        return XdowsModelNativeStatusOk;
-    }
-
-    if (!IsPeFile(bytes))
-    {
-        result->Status = XdowsModelNativeStatusOk;
-        result->IsThreat = 0;
-        result->Probability = 0.0f;
-        return XdowsModelNativeStatusOk;
-    }
-
-    float probability = 0;
-    int decisionMode = nativeSession->Mode;
-    std::wstring error;
-    if (nativeSession->Mode == XdowsModelNativeModeAdaptive)
-    {
-        if (!RunAdaptive(nativeSession, bytes, probability, decisionMode, error))
-        {
-            SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"adaptive-run-failed" : error);
-            return XdowsModelNativeStatusInternalError;
-        }
+        ok = ScanViaFullRead(nativeSession, path, result);
     }
     else
     {
-        std::vector<float> features;
-        if (!ExtractFeaturesForMode(nativeSession->Mode, nativeSession->FeatureCount, bytes, features))
-        {
-            SetError(result, XdowsModelNativeStatusUnsupportedFile, L"feature-extraction-failed");
-            return XdowsModelNativeStatusUnsupportedFile;
-        }
-        if (!RunOnnx(nativeSession, features, probability, error))
-        {
-            SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error);
-            return XdowsModelNativeStatusInternalError;
-        }
+        ok = ScanViaRegions(nativeSession, path, result);
     }
 
-    result->Status = XdowsModelNativeStatusOk;
-    result->Probability = probability;
-    if (probability >= ThresholdForMode(decisionMode))
-    {
-        result->IsThreat = 1;
-        result->DetectionName = DuplicateString(
-            L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
-            std::to_wstring(static_cast<int>(probability)));
-    }
-    else
-    {
-        result->IsThreat = 0;
-    }
-
-    return XdowsModelNativeStatusOk;
+    return ok ? XdowsModelNativeStatusOk : result->Status;
 }
 
 extern "C" XDOWS_MODEL_NATIVE_API void __stdcall XdowsModelNativeShutdown(
