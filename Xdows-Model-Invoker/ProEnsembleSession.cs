@@ -1,3 +1,4 @@
+using System.Buffers;
 using Microsoft.ML.OnnxRuntime;
 using Xdows_Model_Config;
 
@@ -26,7 +27,7 @@ internal sealed class ProEnsembleSession : IDisposable
                 string path = AddSuffix(fusionModelPath, suffixes[i]);
                 if (!File.Exists(path))
                     throw new FileNotFoundException($"缺少 Pro Stacking 分支模型：{Path.GetFileName(path)}", path);
-                _branches[i] = new InferenceSession(path);
+                _branches[i] = new InferenceSession(path, ModelInvoker.CreateSessionOptions());
                 ValidateDimension(_branches[i], dimensions[i], Path.GetFileName(path));
             }
         }
@@ -42,19 +43,39 @@ internal sealed class ProEnsembleSession : IDisposable
         if (hybridFeatures.Length != FeatureSchema.ProHybridFeatureCount)
             throw new ArgumentException($"Pro 混合特征必须为 {FeatureSchema.ProHybridFeatureCount} 维。", nameof(hybridFeatures));
 
-        var fusionFeatures = new float[FeatureSchema.ProFusionFeatureCount];
-        fusionFeatures[0] = PredictBranch(0, hybridFeatures, FeatureSchema.ProStandardOffset, FeatureSchema.StandardFeatureCount);
-        fusionFeatures[1] = PredictBranch(1, hybridFeatures, FeatureSchema.ProFlashOffset, FeatureSchema.FlashFeatureCount);
-        fusionFeatures[2] = PredictBranch(2, hybridFeatures, FeatureSchema.ProRawStatOffset, FeatureSchema.ProRawStatCount);
-        fusionFeatures[3] = PredictBranch(3, hybridFeatures, FeatureSchema.ProStructuralOffset, FeatureSchema.ProStructuralCount);
-        return ModelInvoker.RunProbability(fusionSession, fusionFeatures, FeatureSchema.ProFusionFeatureCount);
+        var fusionFeatures = ArrayPool<float>.Shared.Rent(FeatureSchema.ProFusionFeatureCount);
+        try
+        {
+            Parallel.For(0, 4, i => PredictBranch(i, hybridFeatures, fusionFeatures));
+            return ModelInvoker.RunProbability(fusionSession, fusionFeatures, FeatureSchema.ProFusionFeatureCount);
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(fusionFeatures);
+        }
     }
 
-    private float PredictBranch(int index, float[] source, int offset, int count)
+    private void PredictBranch(int index, float[] source, float[] fusionFeatures)
     {
-        var features = new float[count];
-        Array.Copy(source, offset, features, 0, count);
-        return ModelInvoker.RunProbability(_branches[index], features, count) / 100f;
+        (int offset, int count) = index switch
+        {
+            0 => (FeatureSchema.ProStandardOffset, FeatureSchema.StandardFeatureCount),
+            1 => (FeatureSchema.ProFlashOffset, FeatureSchema.FlashFeatureCount),
+            2 => (FeatureSchema.ProRawStatOffset, FeatureSchema.ProRawStatCount),
+            3 => (FeatureSchema.ProStructuralOffset, FeatureSchema.ProStructuralCount),
+            _ => throw new ArgumentOutOfRangeException(nameof(index))
+        };
+
+        var features = ArrayPool<float>.Shared.Rent(count);
+        try
+        {
+            Array.Copy(source, offset, features, 0, count);
+            fusionFeatures[index] = ModelInvoker.RunProbability(_branches[index], features, count) / 100f;
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(features);
+        }
     }
 
     public void Dispose()

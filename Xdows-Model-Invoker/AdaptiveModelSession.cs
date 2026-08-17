@@ -16,9 +16,9 @@ public sealed class AdaptiveModelSession : IDisposable
     internal AdaptiveModelSession(string flashPath, string standardPath, string proPath, TrainingConfig config)
     {
         _config = config;
-        _flashSession = new InferenceSession(flashPath);
-        _standardSession = new InferenceSession(standardPath);
-        _proSession = new InferenceSession(proPath);
+        _flashSession = new InferenceSession(flashPath, ModelInvoker.CreateSessionOptions());
+        _standardSession = new InferenceSession(standardPath, ModelInvoker.CreateSessionOptions());
+        _proSession = new InferenceSession(proPath, ModelInvoker.CreateSessionOptions());
 
         ValidateDimension(_flashSession, FeatureSchema.FlashFeatureCount, "Flash");
         ValidateDimension(_standardSession, FeatureSchema.StandardFeatureCount, "Standard");
@@ -33,11 +33,13 @@ public sealed class AdaptiveModelSession : IDisposable
     {
         if (!File.Exists(filePath))
             throw new FileNotFoundException("找不到指定文件", filePath);
-        byte[] bytes = File.ReadAllBytes(filePath);
-        if (!FeatureExtractor.IsPeFile(bytes))
+
+        // Flash 阶段只读 head/tail 分区（≤2×512KB I/O），避免为最终判定 Safe 的文件读全量
+        long fileSize = new FileInfo(filePath).Length;
+        if (fileSize == 0)
             throw new NotSupportedException("不支持该文件类型");
 
-        float[] flashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray();
+        float[] flashFeatures = FlashFeatureExtractor.ExtractFeatures(filePath).ToFloatArray();
         float flashProbability = ModelInvoker.RunProbability(
             _flashSession,
             flashFeatures,
@@ -45,6 +47,10 @@ public sealed class AdaptiveModelSession : IDisposable
         var flashDecision = AdaptiveDecisionPolicy.EvaluateIntermediate(flashProbability, _config.FlashThreshold);
         if (flashDecision != AdaptiveIntermediateDecision.Escalate)
             return CreateSafeResult(flashProbability, ModelMode.Flash);
+
+        byte[] bytes = File.ReadAllBytes(filePath);
+        if (!FeatureExtractor.IsPeFile(bytes))
+            throw new NotSupportedException("不支持该文件类型");
 
         float[] standardFeatures = FeatureExtractor.ExtractFromBytes(bytes).ToFloatArray();
         float standardProbability = ModelInvoker.RunProbability(
