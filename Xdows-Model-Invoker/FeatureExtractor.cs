@@ -211,6 +211,150 @@ internal static class ByteAnalysisHelper
         }
     }
 
+    /// <summary>
+    /// 单遍同时计算全局字节统计与 256 字节块熵统计，避免对同一文件扫描两遍。
+    /// 块熵的数学语义与 <c>ExtractBlockEntropyOptimized</c> 完全一致：
+    /// 每个 256 字节块（最后一块可能更短）结算一次熵，并汇总 min/max/mean/方差/位置。
+    /// </summary>
+    public static void ComputeCommonStatsSpanWithBlockEntropy(ReadOnlySpan<byte> bytes, Span<long> byteCounts,
+        out int printableCount, out int controlCount, out int whitespaceCount,
+        out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount,
+        out int zeroRunCount, out long totalZeroRunLength,
+        out int maxNonZeroRun, out long totalNonZeroRunLength, out int nonZeroRunCount,
+        out BlockEntropyResult blockEntropy)
+    {
+        printableCount = 0;
+        controlCount = 0;
+        whitespaceCount = 0;
+        letterCount = 0;
+        digitCount = 0;
+        maxZeroRun = 0;
+        highByteCount = 0;
+        zeroRunCount = 0;
+        totalZeroRunLength = 0;
+        maxNonZeroRun = 0;
+        totalNonZeroRunLength = 0;
+        nonZeroRunCount = 0;
+        int currentZeroRun = 0;
+        int currentNonZeroRun = 0;
+
+        const int blockSize = 256;
+        int numBlocks = (bytes.Length + blockSize - 1) / blockSize;
+        if (numBlocks == 0)
+        {
+            blockEntropy = new BlockEntropyResult(0, 0, 0, 0, 0, 0, 0, 0);
+        }
+        else
+        {
+            Span<long> blockByteCounts = stackalloc long[256];
+            double minEntropy = double.MaxValue;
+            double maxEntropy = double.MinValue;
+            double totalEntropy = 0;
+            double totalEntropySquared = 0;
+            int minEntropyBlockIdx = 0;
+            int maxEntropyBlockIdx = 0;
+            double firstBlockEntropy = 0;
+            double lastBlockEntropy = 0;
+            int blockIdx = 0;
+            int blockStart = 0;
+
+            ReadOnlySpan<byte> clsSpan = ByteClass;
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                byte b = bytes[i];
+                byteCounts[b]++;
+
+                byte cls = clsSpan[b];
+                highByteCount += cls & 1;
+                whitespaceCount += (cls >> 1) & 1;
+                int printable = (cls >> 2) & 1;
+                printableCount += printable;
+                controlCount += printable ^ 1;
+                letterCount += (cls >> 3) & printable;
+                digitCount += (cls >> 4) & printable;
+
+                if (b == 0)
+                {
+                    if (currentNonZeroRun > 0)
+                    {
+                        nonZeroRunCount++;
+                        totalNonZeroRunLength += currentNonZeroRun;
+                        if (currentNonZeroRun > maxNonZeroRun)
+                            maxNonZeroRun = currentNonZeroRun;
+                        currentNonZeroRun = 0;
+                    }
+                    currentZeroRun++;
+                    if (currentZeroRun > maxZeroRun)
+                        maxZeroRun = currentZeroRun;
+                }
+                else
+                {
+                    if (currentZeroRun > 0)
+                    {
+                        zeroRunCount++;
+                        totalZeroRunLength += currentZeroRun;
+                        currentZeroRun = 0;
+                    }
+                    currentNonZeroRun++;
+                }
+
+                blockByteCounts[b]++;
+                if ((i + 1) % blockSize == 0 || i == bytes.Length - 1)
+                {
+                    int currentBlockSize = i - blockStart + 1;
+                    double blockEntropyValue = ComputeEntropy(blockByteCounts, currentBlockSize);
+
+                    if (blockIdx == 0) firstBlockEntropy = blockEntropyValue;
+                    if (blockIdx == numBlocks - 1) lastBlockEntropy = blockEntropyValue;
+                    if (blockEntropyValue < minEntropy)
+                    {
+                        minEntropy = blockEntropyValue;
+                        minEntropyBlockIdx = blockIdx;
+                    }
+                    if (blockEntropyValue > maxEntropy)
+                    {
+                        maxEntropy = blockEntropyValue;
+                        maxEntropyBlockIdx = blockIdx;
+                    }
+                    totalEntropy += blockEntropyValue;
+                    totalEntropySquared += blockEntropyValue * blockEntropyValue;
+
+                    blockIdx++;
+                    blockStart = i + 1;
+                    blockByteCounts.Clear();
+                }
+            }
+
+            double meanEntropy = totalEntropy / numBlocks;
+            double variance = (totalEntropySquared / numBlocks) - (meanEntropy * meanEntropy);
+            if (variance < 0) variance = 0;
+
+            blockEntropy = new BlockEntropyResult(
+                minEntropy,
+                maxEntropy,
+                meanEntropy,
+                variance,
+                numBlocks > 1 ? (double)minEntropyBlockIdx / (numBlocks - 1) : 0,
+                numBlocks > 1 ? (double)maxEntropyBlockIdx / (numBlocks - 1) : 0,
+                firstBlockEntropy,
+                lastBlockEntropy);
+        }
+
+        if (currentZeroRun > 0)
+        {
+            zeroRunCount++;
+            totalZeroRunLength += currentZeroRun;
+        }
+
+        if (currentNonZeroRun > 0)
+        {
+            nonZeroRunCount++;
+            totalNonZeroRunLength += currentNonZeroRun;
+            if (currentNonZeroRun > maxNonZeroRun)
+                maxNonZeroRun = currentNonZeroRun;
+        }
+    }
+
     public static double ComputeEntropy(Span<long> byteCounts, int totalBytes)
     {
         double entropy = 0;
@@ -360,6 +504,19 @@ internal static class ByteAnalysisHelper
     }
 }
 
+/// <summary>
+/// 256 字节块熵统计的汇总结果，与 <c>ExtractBlockEntropyOptimized</c> 的输出一一对应。
+/// </summary>
+internal readonly record struct BlockEntropyResult(
+    double MinEntropy,
+    double MaxEntropy,
+    double MeanEntropy,
+    double Variance,
+    double MinPosition,
+    double MaxPosition,
+    double FirstEntropy,
+    double LastEntropy);
+
 public class FeatureExtractor
 {
     public static FileFeatures ExtractFeatures(string filePath)
@@ -382,11 +539,12 @@ public class FeatureExtractor
             return features;
 
         Span<long> byteCounts = stackalloc long[256];
-        ByteAnalysisHelper.ComputeCommonStatsSpan(bytes, byteCounts,
+        ByteAnalysisHelper.ComputeCommonStatsSpanWithBlockEntropy(bytes, byteCounts,
             out int printableCount, out int controlCount, out int whitespaceCount,
             out int letterCount, out int digitCount, out int maxZeroRun, out int highByteCount,
             out int zeroRunCount, out long totalZeroRunLength,
-            out int maxNonZeroRun, out long totalNonZeroRunLength, out int nonZeroRunCount);
+            out int maxNonZeroRun, out long totalNonZeroRunLength, out int nonZeroRunCount,
+            out BlockEntropyResult blockEntropy);
 
         int uniqueBytes = 0;
         long maxCount = 0, minCount = long.MaxValue;
@@ -411,7 +569,14 @@ public class FeatureExtractor
         features.HighEntropyRatio = (double)highByteCount / bytes.Length;
         features.Entropy = ByteAnalysisHelper.ComputeEntropy(byteCounts, bytes.Length);
 
-        ExtractBlockEntropyOptimized(bytes, features);
+        features.MinBlockEntropy = blockEntropy.MinEntropy;
+        features.MaxBlockEntropy = blockEntropy.MaxEntropy;
+        features.MeanBlockEntropy = blockEntropy.MeanEntropy;
+        features.BlockEntropyVariance = blockEntropy.Variance;
+        features.MinEntropyBlockPosition = blockEntropy.MinPosition;
+        features.MaxEntropyBlockPosition = blockEntropy.MaxPosition;
+        features.FirstBlockEntropy = blockEntropy.FirstEntropy;
+        features.LastBlockEntropy = blockEntropy.LastEntropy;
 
         features.PrintableCharRatio = (double)printableCount / bytes.Length;
         features.ControlCharRatio = (double)controlCount / bytes.Length;
@@ -451,79 +616,6 @@ public class FeatureExtractor
         features.HeadBlockEntropyVar = headBlockEntropyVar;
 
         return features;
-    }
-
-    internal static void ExtractBlockEntropyOptimized(byte[] bytes, FileFeatures features)
-    {
-        const int blockSize = 256;
-        int numBlocks = (bytes.Length + blockSize - 1) / blockSize;
-
-        if (numBlocks == 0)
-        {
-            features.MinBlockEntropy = 0;
-            features.MaxBlockEntropy = 0;
-            features.MeanBlockEntropy = 0;
-            features.BlockEntropyVariance = 0;
-            features.MinEntropyBlockPosition = 0;
-            features.MaxEntropyBlockPosition = 0;
-            features.FirstBlockEntropy = 0;
-            features.LastBlockEntropy = 0;
-            return;
-        }
-
-        double minEntropy = double.MaxValue;
-        double maxEntropy = double.MinValue;
-        double totalEntropy = 0;
-        double totalEntropySquared = 0;
-        int minEntropyBlockIdx = 0;
-        int maxEntropyBlockIdx = 0;
-        double firstBlockEntropy = 0;
-        double lastBlockEntropy = 0;
-
-        Span<long> blockByteCounts = stackalloc long[256];
-
-        for (int blockIdx = 0; blockIdx < numBlocks; blockIdx++)
-        {
-            int start = blockIdx * blockSize;
-            int end = Math.Min(start + blockSize, bytes.Length);
-            int currentBlockSize = end - start;
-
-            blockByteCounts.Clear();
-
-            for (int i = start; i < end; i++)
-                blockByteCounts[bytes[i]]++;
-
-            double blockEntropy = ByteAnalysisHelper.ComputeEntropy(blockByteCounts, currentBlockSize);
-
-            if (blockIdx == 0) firstBlockEntropy = blockEntropy;
-            if (blockIdx == numBlocks - 1) lastBlockEntropy = blockEntropy;
-
-            if (blockEntropy < minEntropy)
-            {
-                minEntropy = blockEntropy;
-                minEntropyBlockIdx = blockIdx;
-            }
-            if (blockEntropy > maxEntropy)
-            {
-                maxEntropy = blockEntropy;
-                maxEntropyBlockIdx = blockIdx;
-            }
-            totalEntropy += blockEntropy;
-            totalEntropySquared += blockEntropy * blockEntropy;
-        }
-
-        double meanEntropy = totalEntropy / numBlocks;
-        double variance = (totalEntropySquared / numBlocks) - (meanEntropy * meanEntropy);
-        if (variance < 0) variance = 0;
-
-        features.MinBlockEntropy = minEntropy;
-        features.MaxBlockEntropy = maxEntropy;
-        features.MeanBlockEntropy = meanEntropy;
-        features.BlockEntropyVariance = variance;
-        features.MinEntropyBlockPosition = numBlocks > 1 ? (double)minEntropyBlockIdx / (numBlocks - 1) : 0;
-        features.MaxEntropyBlockPosition = numBlocks > 1 ? (double)maxEntropyBlockIdx / (numBlocks - 1) : 0;
-        features.FirstBlockEntropy = firstBlockEntropy;
-        features.LastBlockEntropy = lastBlockEntropy;
     }
 
     internal static void ParsePeHeader(byte[] headerBytes, FileFeatures features)
@@ -1311,9 +1403,10 @@ public static class ProHybridFeatureExtractor
             out RegionStats tailStats, out int tailStart,
             out RegionStats rawHeadStats,
             out RegionStats rawMidStats,
-            out RegionStats rawTailStats);
+            out RegionStats rawTailStats,
+            out BlockEntropyResult blockEntropy);
 
-        BuildStandardFeatures(bytes, fullStats).WriteTo(span.Slice(idx, FileFeatures.FeatureCount));
+        BuildStandardFeatures(bytes, fullStats, blockEntropy).WriteTo(span.Slice(idx, FileFeatures.FeatureCount));
         idx += FileFeatures.FeatureCount;
 
         (byte[] headBytes, byte[] tailBytes) = GetHeadTailBytes(bytes, headLen, tailStart);
@@ -1415,7 +1508,8 @@ public static class ProHybridFeatureExtractor
         out RegionStats tailStats, out int tailStart,
         out RegionStats rawHeadStats,
         out RegionStats rawMidStats,
-        out RegionStats rawTailStats)
+        out RegionStats rawTailStats,
+        out BlockEntropyResult blockEntropy)
     {
         int len = bytes.Length;
         headLen = Math.Min(len, FlashFeatureExtractor.FlashRegionSize);
@@ -1444,48 +1538,109 @@ public static class ProHybridFeatureExtractor
         int rawMidZeroRun = 0, rawMidNonZeroRun = 0;
         int rawTailZeroRun = 0, rawTailNonZeroRun = 0;
 
-        Span<int> points = stackalloc int[8];
-        points[0] = 0;
-        points[1] = rawHeadLen;
-        points[2] = headLen;
-        points[3] = rawMidStart;
-        points[4] = rawMidEnd;
-        points[5] = tailStart;
-        points[6] = rawTailStart;
-        points[7] = len;
-        points.Sort();
-
-        for (int seg = 0; seg < points.Length - 1; seg++)
+        const int blockSize = 256;
+        int numBlocks = (len + blockSize - 1) / blockSize;
+        if (numBlocks == 0)
         {
-            int segStart = points[seg];
-            int segEnd = points[seg + 1];
-            if (segStart >= segEnd)
-                continue;
+            blockEntropy = new BlockEntropyResult(0, 0, 0, 0, 0, 0, 0, 0);
+        }
+        else
+        {
+            Span<long> blockByteCounts = stackalloc long[256];
+            double minEntropy = double.MaxValue;
+            double maxEntropy = double.MinValue;
+            double totalEntropy = 0;
+            double totalEntropySquared = 0;
+            int minEntropyBlockIdx = 0;
+            int maxEntropyBlockIdx = 0;
+            double firstBlockEntropy = 0;
+            double lastBlockEntropy = 0;
+            int blockIdx = 0;
+            int blockStart = 0;
 
-            bool inHead = segStart < headLen && segEnd > 0;
-            bool inTail = segStart < len && segEnd > tailStart;
-            bool inRawHead = segStart < rawHeadLen && segEnd > 0;
-            bool inRawMid = segStart < rawMidEnd && segEnd > rawMidStart;
-            bool inRawTail = segStart < len && segEnd > rawTailStart;
+            Span<int> points = stackalloc int[8];
+            points[0] = 0;
+            points[1] = rawHeadLen;
+            points[2] = headLen;
+            points[3] = rawMidStart;
+            points[4] = rawMidEnd;
+            points[5] = tailStart;
+            points[6] = rawTailStart;
+            points[7] = len;
+            points.Sort();
 
-            for (int i = segStart; i < segEnd; i++)
+            for (int seg = 0; seg < points.Length - 1; seg++)
             {
-                byte b = bytes[i];
-                byte cls = clsSpan[b];
+                int segStart = points[seg];
+                int segEnd = points[seg + 1];
+                if (segStart >= segEnd)
+                    continue;
 
-                UpdateRegion(fullStats, b, cls, ref fullZeroRun, ref fullNonZeroRun);
+                bool inHead = segStart < headLen && segEnd > 0;
+                bool inTail = segStart < len && segEnd > tailStart;
+                bool inRawHead = segStart < rawHeadLen && segEnd > 0;
+                bool inRawMid = segStart < rawMidEnd && segEnd > rawMidStart;
+                bool inRawTail = segStart < len && segEnd > rawTailStart;
 
-                if (inHead)
-                    UpdateRegion(headStats, b, cls, ref headZeroRun, ref headNonZeroRun);
-                if (inTail)
-                    UpdateRegion(tailStats, b, cls, ref tailZeroRun, ref tailNonZeroRun);
-                if (inRawHead)
-                    UpdateRegion(rawHeadStats, b, cls, ref rawHeadZeroRun, ref rawHeadNonZeroRun);
-                if (inRawMid)
-                    UpdateRegion(rawMidStats, b, cls, ref rawMidZeroRun, ref rawMidNonZeroRun);
-                if (inRawTail)
-                    UpdateRegion(rawTailStats, b, cls, ref rawTailZeroRun, ref rawTailNonZeroRun);
+                for (int i = segStart; i < segEnd; i++)
+                {
+                    byte b = bytes[i];
+                    byte cls = clsSpan[b];
+
+                    UpdateRegion(fullStats, b, cls, ref fullZeroRun, ref fullNonZeroRun);
+
+                    if (inHead)
+                        UpdateRegion(headStats, b, cls, ref headZeroRun, ref headNonZeroRun);
+                    if (inTail)
+                        UpdateRegion(tailStats, b, cls, ref tailZeroRun, ref tailNonZeroRun);
+                    if (inRawHead)
+                        UpdateRegion(rawHeadStats, b, cls, ref rawHeadZeroRun, ref rawHeadNonZeroRun);
+                    if (inRawMid)
+                        UpdateRegion(rawMidStats, b, cls, ref rawMidZeroRun, ref rawMidNonZeroRun);
+                    if (inRawTail)
+                        UpdateRegion(rawTailStats, b, cls, ref rawTailZeroRun, ref rawTailNonZeroRun);
+
+                    blockByteCounts[b]++;
+                    if ((i + 1) % blockSize == 0 || i == len - 1)
+                    {
+                        int currentBlockSize = i - blockStart + 1;
+                        double blockEntropyValue = ByteAnalysisHelper.ComputeEntropy(blockByteCounts, currentBlockSize);
+
+                        if (blockIdx == 0) firstBlockEntropy = blockEntropyValue;
+                        if (blockIdx == numBlocks - 1) lastBlockEntropy = blockEntropyValue;
+                        if (blockEntropyValue < minEntropy)
+                        {
+                            minEntropy = blockEntropyValue;
+                            minEntropyBlockIdx = blockIdx;
+                        }
+                        if (blockEntropyValue > maxEntropy)
+                        {
+                            maxEntropy = blockEntropyValue;
+                            maxEntropyBlockIdx = blockIdx;
+                        }
+                        totalEntropy += blockEntropyValue;
+                        totalEntropySquared += blockEntropyValue * blockEntropyValue;
+
+                        blockIdx++;
+                        blockStart = i + 1;
+                        blockByteCounts.Clear();
+                    }
+                }
             }
+
+            double meanEntropy = totalEntropy / numBlocks;
+            double variance = (totalEntropySquared / numBlocks) - (meanEntropy * meanEntropy);
+            if (variance < 0) variance = 0;
+
+            blockEntropy = new BlockEntropyResult(
+                minEntropy,
+                maxEntropy,
+                meanEntropy,
+                variance,
+                numBlocks > 1 ? (double)minEntropyBlockIdx / (numBlocks - 1) : 0,
+                numBlocks > 1 ? (double)maxEntropyBlockIdx / (numBlocks - 1) : 0,
+                firstBlockEntropy,
+                lastBlockEntropy);
         }
 
         FinalizeRegion(fullStats, fullZeroRun, fullNonZeroRun);
@@ -1510,7 +1665,7 @@ public static class ProHybridFeatureExtractor
         return (headBytes, tailBytes);
     }
 
-    private static FileFeatures BuildStandardFeatures(byte[] bytes, RegionStats stats)
+    private static FileFeatures BuildStandardFeatures(byte[] bytes, RegionStats stats, BlockEntropyResult blockEntropy)
     {
         var features = new FileFeatures { FileSize = bytes.Length };
         if (bytes.Length == 0)
@@ -1543,7 +1698,14 @@ public static class ProHybridFeatureExtractor
         features.HighEntropyRatio = (double)stats.HighByteCount / length;
         features.Entropy = ByteAnalysisHelper.ComputeEntropy(byteCounts, length);
 
-        FeatureExtractor.ExtractBlockEntropyOptimized(bytes, features);
+        features.MinBlockEntropy = blockEntropy.MinEntropy;
+        features.MaxBlockEntropy = blockEntropy.MaxEntropy;
+        features.MeanBlockEntropy = blockEntropy.MeanEntropy;
+        features.BlockEntropyVariance = blockEntropy.Variance;
+        features.MinEntropyBlockPosition = blockEntropy.MinPosition;
+        features.MaxEntropyBlockPosition = blockEntropy.MaxPosition;
+        features.FirstBlockEntropy = blockEntropy.FirstEntropy;
+        features.LastBlockEntropy = blockEntropy.LastEntropy;
 
         features.PrintableCharRatio = (double)stats.PrintableCount / length;
         features.ControlCharRatio = (double)stats.ControlCount / length;
