@@ -123,8 +123,23 @@ internal static class Program
         }
     }
 
-    private static void PrintActiveThreshold(CallerMode mode)
+private static void PrintActiveThreshold(CallerMode mode)
     {
+        if (mode == CallerMode.Adaptive)
+        {
+            Console.WriteLine(
+                $"固定判毒阈值：Standard {ModelInvoker.GetThreshold(ModelMode.Standard):F2}% / " +
+                $"Flash {ModelInvoker.GetThreshold(ModelMode.Flash):F2}% / " +
+                $"Pro {ModelInvoker.GetThreshold(ModelMode.Pro):F2}%（{ModelInvoker.GetThresholdSource(ModelMode.Pro)}）");
+            foreach (ModelMode m in new[] { ModelMode.Standard, ModelMode.Flash, ModelMode.Pro })
+            {
+                Console.WriteLine(
+                    $"推荐判毒阈值（{m}）：{ModelInvoker.GetRecommendedThreshold(m):F2}%" +
+                    $"（{ModelInvoker.GetRecommendedThresholdSource(m)}）");
+            }
+            return;
+        }
+
         ModelMode modelMode = mode switch
         {
             CallerMode.Flash => ModelMode.Flash,
