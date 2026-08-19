@@ -29,20 +29,12 @@ namespace Xdows_Model_Invoker
         private static float _standardThreshold = NormalizeThreshold((float)_defaultConfig.StandardThreshold);
         private static float _flashThreshold = NormalizeThreshold((float)_defaultConfig.FlashThreshold);
         private static float _proThreshold = NormalizeThreshold((float)_defaultConfig.ProThreshold);
-        private static string _standardThresholdSource = ConfiguredThresholdSource;
-        private static string _flashThresholdSource = ConfiguredThresholdSource;
-        private static string _proThresholdSource = ConfiguredThresholdSource;
 
         // 推荐阈值与固定阈值分开存储：固定阈值来自 TrainingConfig（判毒下限），
         // 推荐阈值来自模型旁 *.threshold.json 清单（Suspicious 区间下限）。清单缺失时回退到固定值。
         private static float _standardRecommendedThreshold = NormalizeThreshold((float)_defaultConfig.StandardThreshold);
         private static float _flashRecommendedThreshold = NormalizeThreshold((float)_defaultConfig.FlashThreshold);
         private static float _proRecommendedThreshold = NormalizeThreshold((float)_defaultConfig.ProThreshold);
-        private static string _standardRecommendedThresholdSource = ConfiguredThresholdSource;
-        private static string _flashRecommendedThresholdSource = ConfiguredThresholdSource;
-        private static string _proRecommendedThresholdSource = ConfiguredThresholdSource;
-
-        internal const string ConfiguredThresholdSource = "配置固定阈值";
 
         /// <summary>
         /// 是否在加载模型时自动采用模型旁 <c>*.threshold.json</c> 里训练阶段校准出的推荐阈值。
@@ -273,17 +265,11 @@ namespace Xdows_Model_Invoker
             _defaultConfig.StandardThreshold = standardThreshold;
             _defaultConfig.FlashThreshold = flashThreshold;
             _defaultConfig.ProThreshold = proThreshold;
-            _standardThresholdSource = ConfiguredThresholdSource;
-            _flashThresholdSource = ConfiguredThresholdSource;
-            _proThresholdSource = ConfiguredThresholdSource;
 
             // 未加载清单时推荐阈值与固定阈值一致（Suspicious 区间为空，退化为二档判定）。
             _standardRecommendedThreshold = standardThreshold;
             _flashRecommendedThreshold = flashThreshold;
             _proRecommendedThreshold = proThreshold;
-            _standardRecommendedThresholdSource = ConfiguredThresholdSource;
-            _flashRecommendedThresholdSource = ConfiguredThresholdSource;
-            _proRecommendedThresholdSource = ConfiguredThresholdSource;
         }
 
         /// <summary>
@@ -308,22 +294,17 @@ namespace Xdows_Model_Invoker
         private static void ApplyThresholdManifest(string modelPath, ModelMode mode)
         {
             if (!AutoThresholdSelection)
-            {
-                SetRecommendedThresholdSource(mode, ConfiguredThresholdSource);
                 return;
-            }
 
             if (!ModelThresholdManifest.TryLoad(modelPath, mode.ToString(), out ModelThresholdManifest? manifest, out string? failureReason))
             {
                 if (!string.IsNullOrEmpty(failureReason))
                     Console.Error.WriteLine($"[Xdows-Model] {mode} 阈值清单被忽略：{failureReason}");
-                SetRecommendedThresholdSource(mode, ConfiguredThresholdSource);
                 return;
             }
 
             float threshold = NormalizeThreshold((float)manifest!.RecommendedThreshold);
             SetRecommendedThreshold(mode, threshold);
-            SetRecommendedThresholdSource(mode, $"清单推荐，{manifest.SelectionMethod}");
         }
 
         private static void SetThreshold(ModelMode mode, float threshold)
@@ -361,52 +342,6 @@ namespace Xdows_Model_Invoker
             }
         }
 
-        private static void SetThresholdSource(ModelMode mode, string source)
-        {
-            switch (mode)
-            {
-                case ModelMode.Flash:
-                    _flashThresholdSource = source;
-                    break;
-                case ModelMode.Pro:
-                    _proThresholdSource = source;
-                    break;
-                default:
-                    _standardThresholdSource = source;
-                    break;
-            }
-        }
-
-        private static void SetRecommendedThresholdSource(ModelMode mode, string source)
-        {
-            switch (mode)
-            {
-                case ModelMode.Flash:
-                    _flashRecommendedThresholdSource = source;
-                    break;
-                case ModelMode.Pro:
-                    _proRecommendedThresholdSource = source;
-                    break;
-                default:
-                    _standardRecommendedThresholdSource = source;
-                    break;
-            }
-        }
-
-        /// <summary>
-        /// 返回当前阈值的来源说明，便于调用端展示实际生效的工作点出处。
-        /// </summary>
-        public static string GetThresholdSource(ModelMode mode)
-        {
-            return mode switch
-            {
-                ModelMode.Flash => _flashThresholdSource,
-                ModelMode.Pro => _proThresholdSource,
-                ModelMode.Adaptive => _proThresholdSource,
-                _ => _standardThresholdSource
-            };
-        }
-
         public static float GetThreshold(ModelMode mode)
         {
             return mode switch
@@ -429,20 +364,6 @@ namespace Xdows_Model_Invoker
                 ModelMode.Pro => _proRecommendedThreshold,
                 ModelMode.Adaptive => _proRecommendedThreshold,
                 _ => _standardRecommendedThreshold
-            };
-        }
-
-        /// <summary>
-        /// 返回推荐阈值的来源说明，便于调用端展示实际生效的 Suspicious 判定下限出处。
-        /// </summary>
-        public static string GetRecommendedThresholdSource(ModelMode mode)
-        {
-            return mode switch
-            {
-                ModelMode.Flash => _flashRecommendedThresholdSource,
-                ModelMode.Pro => _proRecommendedThresholdSource,
-                ModelMode.Adaptive => _proRecommendedThresholdSource,
-                _ => _standardRecommendedThresholdSource
             };
         }
 
@@ -663,13 +584,11 @@ internal static float RunProbability(InferenceSession session, float[] features,
             {
                 if (!string.IsNullOrEmpty(failureReason))
                     Console.Error.WriteLine($"[Xdows-Model] {mode} 阈值清单被忽略：{failureReason}");
-                SetRecommendedThresholdSource(mode, ConfiguredThresholdSource);
                 return fallbackThreshold;
             }
 
             float threshold = NormalizeThreshold((float)manifest!.RecommendedThreshold);
             SetRecommendedThreshold(mode, threshold);
-            SetRecommendedThresholdSource(mode, $"清单推荐，{manifest.SelectionMethod}");
             return threshold;
         }
 
