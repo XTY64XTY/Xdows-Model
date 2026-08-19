@@ -1,0 +1,13 @@
+{
+  "SchemaVersion": 1,
+  "ModelMode": "Flash",
+  "RecommendedThreshold": 61.10222244262695,
+  "SelectionMethod": "\u4EE3\u4EF7\u654F\u611F\uFF081 \u8BEF\u62A5 = 2.65 \u6F0F\u62A5\uFF09",
+  "FalsePositiveCostRatio": 2.65,
+  "FalseNegative": 528,
+  "FalsePositive": 170,
+  "TruePositiveRate": 0.9511698880976602,
+  "FalsePositiveRate": 0.010308028134853263,
+  "EvaluatedSamples": 27305,
+  "GeneratedAt": "2026-08-19 16:26:15"
+}

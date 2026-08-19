@@ -1,0 +1,13 @@
+{
+  "SchemaVersion": 1,
+  "ModelMode": "Pro",
+  "RecommendedThreshold": 69.11109924316406,
+  "SelectionMethod": "\u4EE3\u4EF7\u654F\u611F\uFF081 \u8BEF\u62A5 = 2.65 \u6F0F\u62A5\uFF09",
+  "FalsePositiveCostRatio": 2.65,
+  "FalseNegative": 415,
+  "FalsePositive": 146,
+  "TruePositiveRate": 0.9616415565209354,
+  "FalsePositiveRate": 0.008985168318050341,
+  "EvaluatedSamples": 27068,
+  "GeneratedAt": "2026-08-19 16:57:26"
+}

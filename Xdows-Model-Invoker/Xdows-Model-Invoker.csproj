@@ -41,8 +41,14 @@
     <Content Include="Xdows-Model-Pro-Flash.onnx" Condition="Exists('Xdows-Model-Pro-Flash.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
     <EmbeddedResource Include="Xdows-Model-Pro-RawStat.onnx" Condition="Exists('Xdows-Model-Pro-RawStat.onnx')" />
     <Content Include="Xdows-Model-Pro-RawStat.onnx" Condition="Exists('Xdows-Model-Pro-RawStat.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-    <EmbeddedResource Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')" />
+<EmbeddedResource Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')" />
     <Content Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <EmbeddedResource Include="Xdows-Model.threshold.json" Condition="Exists('Xdows-Model.threshold.json')" />
+    <Content Include="Xdows-Model.threshold.json" Condition="Exists('Xdows-Model.threshold.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <EmbeddedResource Include="Xdows-Model-Flash.threshold.json" Condition="Exists('Xdows-Model-Flash.threshold.json')" />
+    <Content Include="Xdows-Model-Flash.threshold.json" Condition="Exists('Xdows-Model-Flash.threshold.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <EmbeddedResource Include="Xdows-Model-Pro.threshold.json" Condition="Exists('Xdows-Model-Pro.threshold.json')" />
+    <Content Include="Xdows-Model-Pro.threshold.json" Condition="Exists('Xdows-Model-Pro.threshold.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
   </ItemGroup>
 
 </Project>
