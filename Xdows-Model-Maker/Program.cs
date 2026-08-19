@@ -49,6 +49,7 @@ internal class Program
             new() { Text = "开始清洗", Type = MenuItemType.Action },
             new() { Text = "", Type = MenuItemType.Header },
             new() { Text = "其它选项", Type = MenuItemType.Header },
+            new() { Text = "复制产物到调用器", Type = MenuItemType.Action },
             new() { Text = "退出程序", Type = MenuItemType.Action }
         };
 
@@ -87,6 +88,13 @@ internal class Program
                                 var config = new TrainingConfig();
                                 ExecuteCleaning(config, menuItems);
                                 exitMenu = true;
+                            }
+                            else if (item.Text == "复制产物到调用器")
+                            {
+                                Console.WriteLine();
+                                TrainingOutputCopier.CopyToInvokerSource();
+                                Console.WriteLine("\n按任意键返回菜单...");
+                                Console.ReadKey();
                             }
                             else if (item.Text == "退出程序")
                             {
@@ -303,9 +311,6 @@ internal class Program
                 Console.WriteLine("  所有模型训练完成！");
                 Console.WriteLine("*********************************************");
             }
-
-            Console.WriteLine();
-            TrainingOutputCopier.CopyToInvokerSource();
         }
         catch (Exception ex)
         {
