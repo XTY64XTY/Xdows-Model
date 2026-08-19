@@ -73,6 +73,7 @@ AssertCostSensitiveThresholdSelection();
 AssertCostSensitiveWeightResolution();
 AssertThresholdManifestRoundTrip();
 AssertThresholdManifestRejection();
+AssertThreeTierVerdict();
 AssertProParallelScoringEquivalence();
 AssertTrainingThreadResolution();
 Console.WriteLine("PASS: Standard training policy preserves class balance and optimizes recall under an FPR cap.");
@@ -126,6 +127,52 @@ static void AssertDecision(float probability, double threshold, AdaptiveIntermed
     var actual = AdaptiveDecisionPolicy.EvaluateIntermediate(probability, threshold);
     if (actual != expected)
         throw new InvalidOperationException($"{scenario}: expected {expected}, got {actual}.");
+}
+
+static void AssertThreeTierVerdict()
+{
+    const float fixedThreshold = 92.0f;
+    const float recommendedThreshold = 56.45f;
+
+    void Expect(ScanVerdict expected, float probability, string scenario)
+    {
+        var actual = ModelInvoker.ClassifyVerdict(probability, fixedThreshold, recommendedThreshold);
+        if (actual != expected)
+            throw new InvalidOperationException(
+                $"{scenario}: probability {probability} with fixed {fixedThreshold}, recommended {recommendedThreshold} " +
+                $"should be {expected}, got {actual}.");
+    }
+
+    // 输出 >= 固定阈值 → Malware
+    Expect(ScanVerdict.Malware, 92.0f, "Malware at fixed threshold boundary");
+    Expect(ScanVerdict.Malware, 92.5f, "Malware above fixed threshold");
+    Expect(ScanVerdict.Malware, 100.0f, "Malware at maximum");
+
+    // 固定阈值 > 输出 >= 推荐阈值 → Suspicious
+    Expect(ScanVerdict.Suspicious, 91.99f, "Suspicious just below fixed threshold");
+    Expect(ScanVerdict.Suspicious, 80.0f, "Suspicious mid zone");
+    Expect(ScanVerdict.Suspicious, 56.45f, "Suspicious at recommended threshold boundary");
+
+    // 输出 < 推荐阈值 → Clean
+    Expect(ScanVerdict.Clean, 56.44f, "Clean just below recommended threshold");
+    Expect(ScanVerdict.Clean, 0.0f, "Clean at zero");
+
+    // 退化：推荐阈值 == 固定阈值时无 Suspicious 区间
+    if (ModelInvoker.ClassifyVerdict(92.0f, fixedThreshold, fixedThreshold) != ScanVerdict.Malware ||
+        ModelInvoker.ClassifyVerdict(91.99f, fixedThreshold, fixedThreshold) != ScanVerdict.Clean)
+    {
+        throw new InvalidOperationException("Degenerate equal thresholds must collapse to two-tier verdicts.");
+    }
+
+    // 异常清单：推荐阈值高于固定阈值时仍先比较固定阈值（Suspicious 区间为空）
+    if (ModelInvoker.ClassifyVerdict(96.0f, fixedThreshold, 95.0f) != ScanVerdict.Malware ||
+        ModelInvoker.ClassifyVerdict(93.0f, fixedThreshold, 95.0f) != ScanVerdict.Malware ||
+        ModelInvoker.ClassifyVerdict(91.0f, fixedThreshold, 95.0f) != ScanVerdict.Clean)
+    {
+        throw new InvalidOperationException("Fixed threshold must be consulted before the recommended threshold.");
+    }
+
+    Console.WriteLine("PASS: Three-tier verdict maps probability against fixed and recommended thresholds.");
 }
 
 static void AssertStandardThresholdSelection()

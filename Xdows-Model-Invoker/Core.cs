@@ -33,6 +33,15 @@ namespace Xdows_Model_Invoker
         private static string _flashThresholdSource = ConfiguredThresholdSource;
         private static string _proThresholdSource = ConfiguredThresholdSource;
 
+        // 推荐阈值与固定阈值分开存储：固定阈值来自 TrainingConfig（判毒下限），
+        // 推荐阈值来自模型旁 *.threshold.json 清单（Suspicious 区间下限）。清单缺失时回退到固定值。
+        private static float _standardRecommendedThreshold = NormalizeThreshold((float)_defaultConfig.StandardThreshold);
+        private static float _flashRecommendedThreshold = NormalizeThreshold((float)_defaultConfig.FlashThreshold);
+        private static float _proRecommendedThreshold = NormalizeThreshold((float)_defaultConfig.ProThreshold);
+        private static string _standardRecommendedThresholdSource = ConfiguredThresholdSource;
+        private static string _flashRecommendedThresholdSource = ConfiguredThresholdSource;
+        private static string _proRecommendedThresholdSource = ConfiguredThresholdSource;
+
         internal const string ConfiguredThresholdSource = "配置固定阈值";
 
         /// <summary>
@@ -73,13 +82,13 @@ namespace Xdows_Model_Invoker
             throw new FileNotFoundException($"Model file not found. Expected to find '{fileName}' as an embedded resource or next to the Invoker assembly.", fileName);
         }
 
-        public static (bool isVirus, float probability) PredictWithMlNet(string modelPath, float[] features)
+        public static (ScanVerdict verdict, float probability) PredictWithMlNet(string modelPath, float[] features)
         {
             using var session = new InferenceSession(modelPath, CreateSessionOptions());
-            return RunInference(session, features, FileFeatures.FeatureCount, _standardThreshold);
+            return RunInference(session, features, FileFeatures.FeatureCount, _standardThreshold, _standardRecommendedThreshold);
         }
 
-        public static (bool isVirus, float probability) ScanFile(string filePath, string modelPath)
+        public static (ScanVerdict verdict, float probability) ScanFile(string filePath, string modelPath)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("找不到指定文件", filePath);
@@ -94,7 +103,7 @@ namespace Xdows_Model_Invoker
             return PredictWithInitializedModel(features.ToFloatArray());
         }
 
-        public static (bool isVirus, float probability) ScanFileFlash(string filePath, string modelPath)
+        public static (ScanVerdict verdict, float probability) ScanFileFlash(string filePath, string modelPath)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("找不到指定文件", filePath);
@@ -108,7 +117,7 @@ namespace Xdows_Model_Invoker
             return PredictWithInitializedModel(features.ToFloatArray());
         }
 
-        public static (bool isVirus, float probability) ScanFilePro(string filePath, string modelPath)
+        public static (ScanVerdict verdict, float probability) ScanFilePro(string filePath, string modelPath)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("找不到指定文件", filePath);
@@ -267,17 +276,40 @@ namespace Xdows_Model_Invoker
             _standardThresholdSource = ConfiguredThresholdSource;
             _flashThresholdSource = ConfiguredThresholdSource;
             _proThresholdSource = ConfiguredThresholdSource;
+
+            // 未加载清单时推荐阈值与固定阈值一致（Suspicious 区间为空，退化为二档判定）。
+            _standardRecommendedThreshold = standardThreshold;
+            _flashRecommendedThreshold = flashThreshold;
+            _proRecommendedThreshold = proThreshold;
+            _standardRecommendedThresholdSource = ConfiguredThresholdSource;
+            _flashRecommendedThresholdSource = ConfiguredThresholdSource;
+            _proRecommendedThresholdSource = ConfiguredThresholdSource;
         }
 
         /// <summary>
-        /// 按模型旁的阈值清单自动设置该模式的判毒阈值。清单不存在或无效时保留配置阈值，
+        /// 三档判定：输出 >= 固定阈值 → <see cref="ScanVerdict.Malware"/>；
+        /// 固定阈值 > 输出 >= 推荐阈值 → <see cref="ScanVerdict.Suspicious"/>；否则 <see cref="ScanVerdict.Clean"/>。
+        /// 先比较固定阈值再比较推荐阈值，即使清单推荐值异常高于固定阈值也能保持正确顺序。
+        /// </summary>
+        public static ScanVerdict ClassifyVerdict(float probability, float fixedThreshold, float recommendedThreshold)
+        {
+            if (probability >= fixedThreshold)
+                return ScanVerdict.Malware;
+            if (probability >= recommendedThreshold)
+                return ScanVerdict.Suspicious;
+            return ScanVerdict.Clean;
+        }
+
+        /// <summary>
+        /// 按模型旁的阈值清单自动设置该模式的推荐判毒阈值。清单不存在或无效时推荐阈值回退到固定阈值，
         /// 并在原因明确时输出诊断信息，避免线上工作点在无声中偏离预期。
+        /// 固定阈值（判毒下限）永远不被清单覆盖。
         /// </summary>
         private static void ApplyThresholdManifest(string modelPath, ModelMode mode)
         {
             if (!AutoThresholdSelection)
             {
-                SetThresholdSource(mode, ConfiguredThresholdSource);
+                SetRecommendedThresholdSource(mode, ConfiguredThresholdSource);
                 return;
             }
 
@@ -285,13 +317,13 @@ namespace Xdows_Model_Invoker
             {
                 if (!string.IsNullOrEmpty(failureReason))
                     Console.Error.WriteLine($"[Xdows-Model] {mode} 阈值清单被忽略：{failureReason}");
-                SetThresholdSource(mode, ConfiguredThresholdSource);
+                SetRecommendedThresholdSource(mode, ConfiguredThresholdSource);
                 return;
             }
 
             float threshold = NormalizeThreshold((float)manifest!.RecommendedThreshold);
-            SetThreshold(mode, threshold);
-            SetThresholdSource(mode, $"清单推荐，{manifest.SelectionMethod}");
+            SetRecommendedThreshold(mode, threshold);
+            SetRecommendedThresholdSource(mode, $"清单推荐，{manifest.SelectionMethod}");
         }
 
         private static void SetThreshold(ModelMode mode, float threshold)
@@ -313,6 +345,22 @@ namespace Xdows_Model_Invoker
             }
         }
 
+        private static void SetRecommendedThreshold(ModelMode mode, float threshold)
+        {
+            switch (mode)
+            {
+                case ModelMode.Flash:
+                    _flashRecommendedThreshold = threshold;
+                    break;
+                case ModelMode.Pro:
+                    _proRecommendedThreshold = threshold;
+                    break;
+                default:
+                    _standardRecommendedThreshold = threshold;
+                    break;
+            }
+        }
+
         private static void SetThresholdSource(ModelMode mode, string source)
         {
             switch (mode)
@@ -325,6 +373,22 @@ namespace Xdows_Model_Invoker
                     break;
                 default:
                     _standardThresholdSource = source;
+                    break;
+            }
+        }
+
+        private static void SetRecommendedThresholdSource(ModelMode mode, string source)
+        {
+            switch (mode)
+            {
+                case ModelMode.Flash:
+                    _flashRecommendedThresholdSource = source;
+                    break;
+                case ModelMode.Pro:
+                    _proRecommendedThresholdSource = source;
+                    break;
+                default:
+                    _standardRecommendedThresholdSource = source;
                     break;
             }
         }
@@ -351,6 +415,34 @@ namespace Xdows_Model_Invoker
                 ModelMode.Pro => _proThreshold,
                 ModelMode.Adaptive => _proThreshold,
                 _ => _standardThreshold
+            };
+        }
+
+        /// <summary>
+        /// 返回当前模式的推荐阈值（Suspicious 区间下限）。清单缺失时与固定阈值一致。
+        /// </summary>
+        public static float GetRecommendedThreshold(ModelMode mode)
+        {
+            return mode switch
+            {
+                ModelMode.Flash => _flashRecommendedThreshold,
+                ModelMode.Pro => _proRecommendedThreshold,
+                ModelMode.Adaptive => _proRecommendedThreshold,
+                _ => _standardRecommendedThreshold
+            };
+        }
+
+        /// <summary>
+        /// 返回推荐阈值的来源说明，便于调用端展示实际生效的 Suspicious 判定下限出处。
+        /// </summary>
+        public static string GetRecommendedThresholdSource(ModelMode mode)
+        {
+            return mode switch
+            {
+                ModelMode.Flash => _flashRecommendedThresholdSource,
+                ModelMode.Pro => _proRecommendedThresholdSource,
+                ModelMode.Adaptive => _proRecommendedThresholdSource,
+                _ => _standardRecommendedThresholdSource
             };
         }
 
@@ -397,7 +489,7 @@ namespace Xdows_Model_Invoker
             throw new InvalidOperationException("无法从 ONNX 模型元数据中读取 Pro 模型特征维度");
         }
 
-        private static (bool isVirus, float probability) PredictWithInitializedModel(float[] features)
+        private static (ScanVerdict verdict, float probability) PredictWithInitializedModel(float[] features)
         {
             if (_session == null)
                 throw new InvalidOperationException("ModelInvoker 没有初始化");
@@ -412,13 +504,13 @@ namespace Xdows_Model_Invoker
             if (_mode == ModelMode.Pro && _proEnsemble != null)
             {
                 float probability = _proEnsemble.Predict(_session, features);
-                return (probability >= _proThreshold, probability);
+                return (ClassifyVerdict(probability, _proThreshold, _proRecommendedThreshold), probability);
             }
 
-            return RunInference(_session, features, featureCount, GetThreshold(_mode));
+            return RunInference(_session, features, featureCount, GetThreshold(_mode), GetRecommendedThreshold(_mode));
         }
 
-        public static (bool isVirus, float probability) ScanFile(string filePath)
+        public static (ScanVerdict verdict, float probability) ScanFile(string filePath)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("找不到指定文件", filePath);
@@ -428,7 +520,7 @@ namespace Xdows_Model_Invoker
                 AdaptiveModelSession adaptiveSession = _adaptiveSession ??
                     throw new InvalidOperationException("ModelInvoker 没有初始化");
                 AdaptiveScanResult result = adaptiveSession.ScanFile(filePath);
-                return (result.IsVirus, result.Probability);
+                return (result.Verdict, result.Probability);
             }
 
             if (_session == null)
@@ -513,10 +605,10 @@ internal static float RunProbability(InferenceSession session, float[] features,
             return probability;
         }
 
-        private static (bool isVirus, float probability) RunInference(InferenceSession session, float[] features, int featureCount, float threshold)
+        private static (ScanVerdict verdict, float probability) RunInference(InferenceSession session, float[] features, int featureCount, float fixedThreshold, float recommendedThreshold)
         {
             float probability = RunProbability(session, features, featureCount);
-            return (probability >= threshold, probability);
+            return (ClassifyVerdict(probability, fixedThreshold, recommendedThreshold), probability);
         }
 
         public static AdaptiveModelSession CreateAdaptiveSession(string? modelDirectory = null, TrainingConfig? config = null)
@@ -537,36 +629,32 @@ internal static float RunProbability(InferenceSession session, float[] features,
                 proPath = Path.Combine(modelDirectory, DefaultProModelFileName);
             }
             TrainingConfig effectiveConfig = config ?? new TrainingConfig();
+            AdaptiveRecommendedThresholds recommended = new(
+                (float)effectiveConfig.FlashThreshold,
+                (float)effectiveConfig.StandardThreshold,
+                (float)effectiveConfig.ProThreshold);
             if (AutoThresholdSelection)
             {
-                effectiveConfig = ApplyThresholdManifests(
-                    effectiveConfig,
-                    standardPath,
-                    flashPath,
-                    proPath);
+                recommended = ResolveRecommendedThresholds(effectiveConfig, standardPath, flashPath, proPath);
             }
 
-            return new AdaptiveModelSession(flashPath, standardPath, proPath, effectiveConfig);
+            return new AdaptiveModelSession(flashPath, standardPath, proPath, effectiveConfig, recommended);
         }
 
         /// <summary>
-        /// Adaptive 会同时用到三个模型，因此按各自的清单分别解析阈值。
-        /// 返回副本，避免污染调用方传入的配置对象。
+        /// Adaptive 会同时用到三个模型，因此按各自的清单分别解析推荐阈值。
+        /// 返回推荐阈值集，配置里的固定阈值保持不被覆盖。
         /// </summary>
-        private static TrainingConfig ApplyThresholdManifests(
+        private static AdaptiveRecommendedThresholds ResolveRecommendedThresholds(
             TrainingConfig config,
             string standardPath,
             string flashPath,
             string proPath)
         {
-            var resolved = new TrainingConfig
-            {
-                StandardThreshold = ResolveManifestThreshold(standardPath, ModelMode.Standard, config.StandardThreshold),
-                FlashThreshold = ResolveManifestThreshold(flashPath, ModelMode.Flash, config.FlashThreshold),
-                ProThreshold = ResolveManifestThreshold(proPath, ModelMode.Pro, config.ProThreshold)
-            };
-
-            return resolved;
+            return new AdaptiveRecommendedThresholds(
+                (float)ResolveManifestThreshold(flashPath, ModelMode.Flash, config.FlashThreshold),
+                (float)ResolveManifestThreshold(standardPath, ModelMode.Standard, config.StandardThreshold),
+                (float)ResolveManifestThreshold(proPath, ModelMode.Pro, config.ProThreshold));
         }
 
         private static double ResolveManifestThreshold(string modelPath, ModelMode mode, double fallbackThreshold)
@@ -575,13 +663,13 @@ internal static float RunProbability(InferenceSession session, float[] features,
             {
                 if (!string.IsNullOrEmpty(failureReason))
                     Console.Error.WriteLine($"[Xdows-Model] {mode} 阈值清单被忽略：{failureReason}");
-                SetThresholdSource(mode, ConfiguredThresholdSource);
+                SetRecommendedThresholdSource(mode, ConfiguredThresholdSource);
                 return fallbackThreshold;
             }
 
             float threshold = NormalizeThreshold((float)manifest!.RecommendedThreshold);
-            SetThreshold(mode, threshold);
-            SetThresholdSource(mode, $"清单推荐，{manifest.SelectionMethod}");
+            SetRecommendedThreshold(mode, threshold);
+            SetRecommendedThresholdSource(mode, $"清单推荐，{manifest.SelectionMethod}");
             return threshold;
         }
 

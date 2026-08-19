@@ -122,6 +122,7 @@ public static class XdowsModelNativeProbe
         public float Probability;
         public IntPtr DetectionName;
         public IntPtr ErrorMessage;
+        public int Verdict;
     }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -155,6 +156,11 @@ public static class XdowsModelNativeProbe
             XdowsModelNativeFreeString(value);
         }
     }
+
+    public static int ScanResultSize()
+    {
+        return Marshal.SizeOf(typeof(ScanResult));
+    }
 }
 "@
 
@@ -177,10 +183,12 @@ public static class XdowsModelNativeProbe
                 $arguments += $ModeFlag
             }
             $output = @($Sample, "QUIT") | & $callerExe @arguments 2>&1 | Out-String
-            if ($output -match "(Safe|Virus)\(([0-9]+(?:\.[0-9]+)?)%\)") {
+            if ($output -match "(Malware|Suspicious|Clean)\(([0-9]+(?:\.[0-9]+)?)%\)") {
+                $verdictName = $Matches[1]
                 [pscustomobject]@{
                     Success = $true
-                    IsThreat = $Matches[1] -eq "Virus"
+                    IsThreat = $verdictName -ne "Clean"
+                    VerdictName = $verdictName
                     Probability = [double]::Parse($Matches[2], [Globalization.CultureInfo]::InvariantCulture)
                     ExpectedFailure = $false
                     FailureReason = $null
@@ -200,6 +208,7 @@ public static class XdowsModelNativeProbe
                 [pscustomobject]@{
                     Success = $false
                     IsThreat = $false
+                    VerdictName = "Unknown"
                     Probability = 0.0
                     ExpectedFailure = $expectedFailure
                     FailureReason = $failureReason
@@ -226,6 +235,7 @@ public static class XdowsModelNativeProbe
             }
 
             $scanResult = New-Object XdowsModelNativeProbe+ScanResult
+            $scanResult.Size = [XdowsModelNativeProbe]::ScanResultSize()
             $scanStatus = [XdowsModelNativeProbe]::XdowsModelNativeScanFile($session, $SamplePath, [ref]$scanResult)
             $detectionName = [XdowsModelNativeProbe]::ReadAndFree($scanResult.DetectionName)
             $errorMessage = [XdowsModelNativeProbe]::ReadAndFree($scanResult.ErrorMessage)
@@ -234,8 +244,17 @@ public static class XdowsModelNativeProbe
                 throw "Native scan failed for mode $Mode with status $scanStatus/$($scanResult.Status): $errorMessage"
             }
 
+            $verdictName = switch ($scanResult.Verdict) {
+                0 { "Clean" }
+                1 { "Suspicious" }
+                2 { "Malware" }
+                default { throw "Native verdict $($scanResult.Verdict) is outside 0..2 for mode $Mode" }
+            }
+
             [pscustomobject]@{
                 IsThreat = $scanResult.IsThreat -ne 0
+                Verdict = $scanResult.Verdict
+                VerdictName = $verdictName
                 Probability = [double]$scanResult.Probability
                 DetectionName = $detectionName
                 ErrorMessage = $errorMessage
@@ -265,6 +284,7 @@ public static class XdowsModelNativeProbe
                 ExpectedFailure = $result.ExpectedFailure
                 FailureReason = $result.FailureReason
                 IsThreat = $result.IsThreat
+                VerdictName = $result.VerdictName
                 Probability = [Math]::Round($result.Probability, 4)
                 Raw = $result.Raw
             }
@@ -298,14 +318,20 @@ public static class XdowsModelNativeProbe
                 throw "$($mode.Name) threat decision mismatch. Managed=$($managed.IsThreat), Native=$($native.IsThreat)"
             }
 
+            if ($managed.VerdictName -ne $native.VerdictName) {
+                throw "$($mode.Name) verdict mismatch. Managed=$($managed.VerdictName), Native=$($native.VerdictName)"
+            }
+
             if ($delta -gt $Tolerance) {
                 throw "$($mode.Name) probability delta $delta exceeds tolerance $Tolerance. Managed=$($managed.Probability), Native=$($native.Probability)"
             }
 
             [pscustomobject]@{
                 Mode = $mode.Name
+                ManagedVerdict = $managed.VerdictName
                 ManagedThreat = $managed.IsThreat
                 ManagedProbability = [Math]::Round($managed.Probability, 4)
+                NativeVerdict = $native.VerdictName
                 NativeThreat = $native.IsThreat
                 NativeProbability = [Math]::Round($native.Probability, 4)
                 Delta = [Math]::Round($delta, 4)

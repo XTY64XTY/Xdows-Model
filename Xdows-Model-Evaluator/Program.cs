@@ -89,7 +89,8 @@ internal static class Program
         {
             try
             {
-                var (isVirus, probability) = ModelInvoker.ScanFile(sample.Path);
+                var (verdict, probability) = ModelInvoker.ScanFile(sample.Path);
+                bool isVirus = verdict != ScanVerdict.Clean; // Suspicious 视为检出（positive）
                 scores.Add(new EvaluationScore(sample.IsMalicious, probability));
 
                 if (sample.IsMalicious && isVirus)

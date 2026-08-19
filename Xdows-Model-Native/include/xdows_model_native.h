@@ -26,6 +26,14 @@ typedef enum XDOWS_MODEL_NATIVE_STATUS {
     XdowsModelNativeStatusInternalError = 5
 } XDOWS_MODEL_NATIVE_STATUS;
 
+typedef enum XDOWS_MODEL_NATIVE_VERDICT {
+    XdowsModelNativeVerdictClean = 0,
+    XdowsModelNativeVerdictSuspicious = 1,
+    XdowsModelNativeVerdictMalware = 2
+} XDOWS_MODEL_NATIVE_VERDICT;
+
+// 版本化协议：调用方应先将 Size 设为 sizeof(XDOWS_MODEL_NATIVE_SCAN_RESULT)。
+// 当 Size 不足（旧调用方按旧布局编译）时，DLL 只写旧字段（不含 Verdict），避免越界写内存。
 typedef struct XDOWS_MODEL_NATIVE_SCAN_RESULT {
     int Size;
     int Status;
@@ -33,6 +41,7 @@ typedef struct XDOWS_MODEL_NATIVE_SCAN_RESULT {
     float Probability;
     wchar_t* DetectionName;
     wchar_t* ErrorMessage;
+    int Verdict;
 } XDOWS_MODEL_NATIVE_SCAN_RESULT;
 
 XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(

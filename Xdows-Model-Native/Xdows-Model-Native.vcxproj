@@ -69,7 +69,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <XdowsOnnxRuntimeVersion>1.26.0</XdowsOnnxRuntimeVersion>
+    <XdowsOnnxRuntimeVersion>1.28.0</XdowsOnnxRuntimeVersion>
     <NuGetPackageRoot Condition="'$(NuGetPackageRoot)' == '' And Exists('D:\NuGetPackages\microsoft.ml.onnxruntime\$(XdowsOnnxRuntimeVersion)\')">D:\NuGetPackages\</NuGetPackageRoot>
     <NuGetPackageRoot Condition="'$(NuGetPackageRoot)' == ''">$(UserProfile)\.nuget\packages\</NuGetPackageRoot>
     <XdowsOnnxRuntimePackageRoot>$(NuGetPackageRoot)microsoft.ml.onnxruntime\$(XdowsOnnxRuntimeVersion)\</XdowsOnnxRuntimePackageRoot>
@@ -80,6 +80,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>include;$(XdowsOnnxRuntimePackageRoot)build\native\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>XDOWS_MODEL_NATIVE_EXPORTS;WIN32_LEAN_AND_MEAN;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>

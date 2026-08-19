@@ -24,7 +24,14 @@ internal static class Program
         ScanResult Scan(string filePath);
     }
 
-    private readonly record struct ScanResult(bool IsThreat, float Probability);
+    private readonly record struct ScanResult(ScanVerdict Verdict, float Probability);
+
+    private static string VerdictName(ScanVerdict verdict) => verdict switch
+    {
+        ScanVerdict.Malware => "Malware",
+        ScanVerdict.Suspicious => "Suspicious",
+        _ => "Clean"
+    };
 
     private static void Main(string[] args)
     {
@@ -106,7 +113,7 @@ internal static class Program
                 }
 
                 ScanResult result = engine.Scan(filePath);
-                string verdict = result.IsThreat ? "Virus" : "Safe";
+                string verdict = VerdictName(result.Verdict);
                 Console.WriteLine($"模型返回：{verdict}({result.Probability:F2}%)\n");
             }
             catch (Exception ex)
@@ -127,7 +134,9 @@ internal static class Program
         };
 
         Console.WriteLine(
-            $"判毒阈值：{ModelInvoker.GetThreshold(modelMode):F2}%（{ModelInvoker.GetThresholdSource(modelMode)}）");
+            $"固定判毒阈值：{ModelInvoker.GetThreshold(modelMode):F2}%（{ModelInvoker.GetThresholdSource(modelMode)}）");
+        Console.WriteLine(
+            $"推荐判毒阈值：{ModelInvoker.GetRecommendedThreshold(modelMode):F2}%（{ModelInvoker.GetRecommendedThresholdSource(modelMode)}）");
     }
 
     private static IScanEngine CreateEngine(CallerOptions options) =>
@@ -169,8 +178,8 @@ internal static class Program
             if (!_initialized)
                 throw new InvalidOperationException($"{Mode} 模型尚未初始化。");
 
-            var (isThreat, probability) = ModelInvoker.ScanFile(filePath);
-            return new ScanResult(isThreat, probability);
+            var (verdict, probability) = ModelInvoker.ScanFile(filePath);
+            return new ScanResult(verdict, probability);
         }
 
         public void Dispose()
@@ -202,7 +211,7 @@ internal static class Program
             AdaptiveModelSession session = _session ??
                 throw new InvalidOperationException("Adaptive 模型尚未初始化。");
             AdaptiveScanResult result = session.ScanFile(filePath);
-            return new ScanResult(result.IsVirus, result.Probability);
+            return new ScanResult(result.Verdict, result.Probability);
         }
 
         public void Dispose() => _session?.Dispose();
@@ -332,6 +341,10 @@ internal static class Program
         Console.WriteLine("阈值说明：");
         Console.WriteLine("  默认自动采用模型旁 *.threshold.json 中训练阶段校准出的推荐阈值。");
         Console.WriteLine("  清单缺失或无效时回退到配置里的固定阈值，初始化后会打印实际生效的阈值。");
+        Console.WriteLine();
+        Console.WriteLine("判定说明（三档）：");
+        Console.WriteLine("  输出 >= 固定阈值 → Malware；固定阈值 > 输出 >= 推荐阈值 → Suspicious；输出 < 推荐阈值 → Clean。");
+        Console.WriteLine("  推荐阈值与固定阈值一致时无 Suspicious 区间，退化为二档判定。");
         Console.WriteLine();
         Console.WriteLine("交互说明：");
         Console.WriteLine("  模型初始化后可连续输入需要扫描的文件名。");

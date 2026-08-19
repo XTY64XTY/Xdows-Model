@@ -10,12 +10,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -53,7 +56,7 @@ namespace
         int NonZeroRunCount = 0;
     };
 
-    struct PeLayout
+struct PeLayout
     {
         int PeOffset = 0;
         int SectionTableOffset = 0;
@@ -69,11 +72,16 @@ namespace
         std::uint16_t DllCharacteristics = 0;
     };
 
+    // 前向声明（定义在本匿名命名空间后方）
+    float ThresholdForMode(int mode);
+    bool TryLoadRecommendedThreshold(const std::filesystem::path& modelPath, int mode, float& recommended);
+
     struct NativeSession
     {
         int Mode = XdowsModelNativeModeStandard;
         int FeatureCount = kStandardFeatureCount;
         std::filesystem::path ModelPath;
+        float RecommendedThreshold = 0.0f;
         Ort::Env Env;
         Ort::SessionOptions Options;
         std::unique_ptr<Ort::Session> Session;
@@ -107,10 +115,12 @@ Options.SetIntraOpNumThreads(1);
                     XdowsModelNativeModeStandard,
                     kStandardFeatureCount,
                     directory / L"Xdows-Model.onnx");
-                AdaptivePro = std::make_unique<NativeSession>(
+AdaptivePro = std::make_unique<NativeSession>(
                     XdowsModelNativeModePro,
                     kProHybridFeatureCount,
                     directory / L"Xdows-Model-Pro.onnx");
+                RecommendedThreshold = ThresholdForMode(XdowsModelNativeModeStandard);
+                TryLoadRecommendedThreshold(ModelPath, XdowsModelNativeModeStandard, RecommendedThreshold);
                 return;
             }
 
@@ -133,6 +143,10 @@ Options.SetIntraOpNumThreads(1);
                         throw std::runtime_error("pro-stacking-branch-dimension-mismatch");
                 }
             }
+
+            // 推荐阈值（Suspicious 区间下限）来自模型旁 *.threshold.json 清单，缺失/无效时回退固定阈值。
+            RecommendedThreshold = ThresholdForMode(Mode);
+            TryLoadRecommendedThreshold(ModelPath, Mode, RecommendedThreshold);
         }
 
         static int ReadFeatureCount(Ort::Session& session, int fallback)
@@ -1349,6 +1363,181 @@ case XdowsModelNativeModePro:
         }
     }
 
+    void SkipJsonWhitespace(const std::string& json, size_t& position)
+    {
+        while (position < json.size() &&
+               (json[position] == ' ' || json[position] == '\t' ||
+                json[position] == '\r' || json[position] == '\n'))
+            position++;
+    }
+
+    // 读取一个 JSON 字符串字面量（支持 \" \\ \/ \b \f \n \r \t 与 \uXXXX 最小转义）。
+    bool ReadJsonString(const std::string& json, size_t& position, std::string& value)
+    {
+        SkipJsonWhitespace(json, position);
+        if (position >= json.size() || json[position] != '"')
+            return false;
+        position++;
+        value.clear();
+        while (position < json.size() && json[position] != '"')
+        {
+            if (json[position] == '\\')
+            {
+                position++;
+                if (position >= json.size())
+                    return false;
+                char escaped = json[position];
+                switch (escaped)
+                {
+                case '"': value.push_back('"'); position++; break;
+                case '\\': value.push_back('\\'); position++; break;
+                case '/': value.push_back('/'); position++; break;
+                case 'b': value.push_back('\b'); position++; break;
+                case 'f': value.push_back('\f'); position++; break;
+                case 'n': value.push_back('\n'); position++; break;
+                case 'r': value.push_back('\r'); position++; break;
+                case 't': value.push_back('\t'); position++; break;
+                case 'u':
+                {
+                    if (position + 4 >= json.size())
+                        return false;
+                    unsigned int code = 0;
+                    for (int k = 1; k <= 4; k++)
+                    {
+                        char c = json[position + k];
+                        code <<= 4;
+                        if (c >= '0' && c <= '9') code |= static_cast<unsigned int>(c - '0');
+                        else if (c >= 'a' && c <= 'f') code |= static_cast<unsigned int>(c - 'a' + 10);
+                        else if (c >= 'A' && c <= 'F') code |= static_cast<unsigned int>(c - 'A' + 10);
+                        else return false;
+                    }
+                    position += 5;
+                    if (code < 0x80)
+                        value.push_back(static_cast<char>(code));
+                    else if (code < 0x800)
+                    {
+                        value.push_back(static_cast<char>(0xC0 | (code >> 6)));
+                        value.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                    }
+                    else
+                    {
+                        value.push_back(static_cast<char>(0xE0 | (code >> 12)));
+                        value.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+                        value.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                    }
+                    break;
+                }
+                default:
+                    return false;
+                }
+            }
+            else
+            {
+                value.push_back(json[position]);
+                position++;
+            }
+        }
+        if (position >= json.size())
+            return false;
+        position++; // 结束引号
+        return true;
+    }
+
+    // 读取一个 JSON 数字字面量（strtod 语义，不做指数范围限制）。
+    bool JsonNumber(const std::string& json, size_t& position, double& value)
+    {
+        SkipJsonWhitespace(json, position);
+        size_t start = position;
+        if (position < json.size() && (json[position] == '-' || json[position] == '+'))
+            position++;
+        bool digits = false;
+        while (position < json.size() &&
+               (std::isdigit(static_cast<unsigned char>(json[position])) ||
+                json[position] == '.' || json[position] == 'e' || json[position] == 'E' ||
+                json[position] == '-' || json[position] == '+'))
+        {
+            if (std::isdigit(static_cast<unsigned char>(json[position])))
+                digits = true;
+            position++;
+        }
+        if (!digits || position == start)
+            return false;
+        value = std::strtod(json.substr(start, position - start).c_str(), nullptr);
+        return true;
+    }
+
+    bool AsciiEqualsIgnoreCase(const std::string& left, const char* right)
+    {
+        size_t i = 0;
+        for (; i < left.size() && right[i] != '\0'; i++)
+        {
+            if (std::toupper(static_cast<unsigned char>(left[i])) !=
+                std::toupper(static_cast<unsigned char>(right[i])))
+                return false;
+        }
+        return i == left.size() && right[i] == '\0';
+    }
+
+    // 从模型旁的 <model-stem>.threshold.json 读取 RecommendedThreshold（推荐阈值，Suspicious 区间下限）。
+    // 仅当清单存在、ModelMode 匹配（大小写不敏感）且数值为有限 0..100 时返回 true；任何失败返回 false（回退固定阈值）。
+    bool TryLoadRecommendedThreshold(const std::filesystem::path& modelPath, int mode, float& recommended)
+    {
+        try
+        {
+            std::filesystem::path manifestPath = modelPath.parent_path() /
+                (modelPath.stem().wstring() + L".threshold.json");
+            if (!std::filesystem::exists(manifestPath))
+                return false;
+
+            std::ifstream input(manifestPath, std::ios::binary);
+            if (!input.is_open())
+                return false;
+            std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            if (json.empty())
+                return false;
+
+            // Adaptive 根会话按 Standard 模式匹配清单。
+            const char* expectedMode = "Standard";
+            if (mode == XdowsModelNativeModeFlash)
+                expectedMode = "Flash";
+            else if (mode == XdowsModelNativeModePro)
+                expectedMode = "Pro";
+
+            size_t position = json.find("\"ModelMode\"");
+            if (position == std::string::npos)
+                return false;
+            position += std::strlen("\"ModelMode\"");
+            SkipJsonWhitespace(json, position);
+            if (position >= json.size() || json[position] != ':')
+                return false;
+            position++;
+            std::string modeValue;
+            if (!ReadJsonString(json, position, modeValue) || !AsciiEqualsIgnoreCase(modeValue, expectedMode))
+                return false;
+
+            position = json.find("\"RecommendedThreshold\"");
+            if (position == std::string::npos)
+                return false;
+            position += std::strlen("\"RecommendedThreshold\"");
+            SkipJsonWhitespace(json, position);
+            if (position >= json.size() || json[position] != ':')
+                return false;
+            position++;
+            double value = 0.0;
+            if (!JsonNumber(json, position, value))
+                return false;
+            if (!std::isfinite(value) || value < 0.0 || value > 100.0)
+                return false;
+
+            recommended = static_cast<float>(value);
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
     const wchar_t* ModelNameForMode(int mode)
     {
         switch (mode)
@@ -1428,29 +1617,91 @@ case XdowsModelNativeModePro:
         return buffer;
     }
 
-    void ResetResult(XDOWS_MODEL_NATIVE_SCAN_RESULT* result)
+    // 版本化 Size 协议：仅当调用方声明的缓冲区足够容纳新布局（含 Verdict 字段）时才能写 Verdict，
+    // 否则保持旧布局写回（不触碰偏移 sizeof - sizeof(int) 之后的内存），兼容旧调用方。
+    bool CanWriteVerdict(int inputSize)
+    {
+        return inputSize >= static_cast<int>(sizeof(XDOWS_MODEL_NATIVE_SCAN_RESULT));
+    }
+
+    void ResetResult(XDOWS_MODEL_NATIVE_SCAN_RESULT* result, int inputSize)
     {
         if (result == nullptr)
             return;
 
-        result->Size = sizeof(XDOWS_MODEL_NATIVE_SCAN_RESULT);
+        result->Size = static_cast<int>(sizeof(XDOWS_MODEL_NATIVE_SCAN_RESULT));
         result->Status = XdowsModelNativeStatusOk;
         result->IsThreat = 0;
         result->Probability = 0.0f;
         result->DetectionName = nullptr;
         result->ErrorMessage = nullptr;
+        if (CanWriteVerdict(inputSize))
+            result->Verdict = XdowsModelNativeVerdictClean;
     }
 
-    void SetError(XDOWS_MODEL_NATIVE_SCAN_RESULT* result, int status, const std::wstring& message)
+    void SetError(XDOWS_MODEL_NATIVE_SCAN_RESULT* result, int status, const std::wstring& message, int inputSize)
     {
         if (result == nullptr)
             return;
 
+        result->Size = static_cast<int>(sizeof(XDOWS_MODEL_NATIVE_SCAN_RESULT));
         result->Status = status;
         result->IsThreat = 0;
         result->Probability = 0.0f;
         result->DetectionName = nullptr;
         result->ErrorMessage = DuplicateString(message);
+        if (CanWriteVerdict(inputSize))
+            result->Verdict = XdowsModelNativeVerdictClean;
+    }
+
+    // 返回指定模式应使用的推荐阈值：Adaptive 从对应子会话取，其余取会话自身加载值。
+    float RecommendedThresholdForMode(NativeSession* session, int mode)
+    {
+        if (session == nullptr)
+            return ThresholdForMode(mode);
+        if (mode == XdowsModelNativeModeFlash && session->AdaptiveFlash)
+            return session->AdaptiveFlash->RecommendedThreshold;
+        if (mode == XdowsModelNativeModeStandard && session->AdaptiveStandard)
+            return session->AdaptiveStandard->RecommendedThreshold;
+        if (mode == XdowsModelNativeModePro && session->AdaptivePro)
+            return session->AdaptivePro->RecommendedThreshold;
+        return session->RecommendedThreshold;
+    }
+
+    // 三档判定：probability >= 固定阈值 → Malware；固定阈值 > probability >= 推荐阈值 → Suspicious；其余 → Clean。
+    // IsThreat 对 Suspicious 也置 1，兼容只看 IsThreat 的旧调用方；DetectionName 仅威胁时设置。
+    void ApplyFinalVerdict(XDOWS_MODEL_NATIVE_SCAN_RESULT* result, NativeSession* session,
+                           int decisionMode, float probability, int inputSize)
+    {
+        result->Status = XdowsModelNativeStatusOk;
+        result->Probability = probability;
+
+        float fixedThreshold = ThresholdForMode(decisionMode);
+        float recommendedThreshold = RecommendedThresholdForMode(session, decisionMode);
+        if (probability >= fixedThreshold)
+        {
+            result->IsThreat = 1;
+            if (CanWriteVerdict(inputSize))
+                result->Verdict = XdowsModelNativeVerdictMalware;
+            result->DetectionName = DuplicateString(
+                L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
+                std::to_wstring(static_cast<int>(probability)));
+        }
+        else if (probability >= recommendedThreshold)
+        {
+            result->IsThreat = 1;
+            if (CanWriteVerdict(inputSize))
+                result->Verdict = XdowsModelNativeVerdictSuspicious;
+            result->DetectionName = DuplicateString(
+                L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
+                std::to_wstring(static_cast<int>(probability)));
+        }
+        else
+        {
+            result->IsThreat = 0;
+            if (CanWriteVerdict(inputSize))
+                result->Verdict = XdowsModelNativeVerdictClean;
+        }
     }
 
     bool RunOnnxSession(Ort::Session* session, int featureCount, const std::vector<float>& features,
@@ -1672,14 +1923,15 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
 // T4：Flash/Adaptive 走分区域读取（只读 head+tail），Standard/Pro 保持全量读取。
     bool ScanViaRegions(NativeSession* nativeSession,
                         const std::filesystem::path& path,
-                        XDOWS_MODEL_NATIVE_SCAN_RESULT* result)
+                        XDOWS_MODEL_NATIVE_SCAN_RESULT* result,
+                        int inputSize)
     {
         std::vector<std::uint8_t> head;
         std::vector<std::uint8_t> tail;
         size_t totalSize = 0;
         if (!ReadFileRegions(path, head, tail, totalSize))
         {
-            SetError(result, XdowsModelNativeStatusInternalError, L"read-failed");
+            SetError(result, XdowsModelNativeStatusInternalError, L"read-failed", inputSize);
             return false;
         }
 
@@ -1690,6 +1942,8 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
             result->IsThreat = 1;
             result->Probability = 100.0f;
             result->DetectionName = DuplicateString(L"Xdows.Model.EICAR");
+            if (CanWriteVerdict(inputSize))
+                result->Verdict = XdowsModelNativeVerdictMalware;
             return true;
         }
 
@@ -1698,6 +1952,8 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
             result->Status = XdowsModelNativeStatusOk;
             result->IsThreat = 0;
             result->Probability = 0.0f;
+            if (CanWriteVerdict(inputSize))
+                result->Verdict = XdowsModelNativeVerdictClean;
             return true;
         }
 
@@ -1708,7 +1964,7 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
         {
             if (!RunAdaptive(nativeSession, path, head, tail, totalSize, probability, decisionMode, error))
             {
-                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"adaptive-run-failed" : error);
+                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"adaptive-run-failed" : error, inputSize);
                 return false;
             }
         }
@@ -1718,36 +1974,24 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
             AppendFlashFeaturesFromRegions(head, tail, totalSize, features);
             if (!RunOnnx(nativeSession, features, probability, error))
             {
-                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error);
+                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error, inputSize);
                 return false;
             }
         }
 
-        result->Status = XdowsModelNativeStatusOk;
-        result->Probability = probability;
-        if (probability >= ThresholdForMode(decisionMode))
-        {
-            result->IsThreat = 1;
-            result->DetectionName = DuplicateString(
-                L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
-                std::to_wstring(static_cast<int>(probability)));
-        }
-        else
-        {
-            result->IsThreat = 0;
-        }
-
+        ApplyFinalVerdict(result, nativeSession, decisionMode, probability, inputSize);
         return true;
     }
 
     bool ScanViaFullRead(NativeSession* nativeSession,
                          const std::filesystem::path& path,
-                         XDOWS_MODEL_NATIVE_SCAN_RESULT* result)
+                         XDOWS_MODEL_NATIVE_SCAN_RESULT* result,
+                         int inputSize)
     {
         std::vector<std::uint8_t> bytes;
         if (!ReadAllBytes(path, bytes))
         {
-            SetError(result, XdowsModelNativeStatusInternalError, L"read-failed");
+            SetError(result, XdowsModelNativeStatusInternalError, L"read-failed", inputSize);
             return false;
         }
 
@@ -1757,6 +2001,8 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
             result->IsThreat = 1;
             result->Probability = 100.0f;
             result->DetectionName = DuplicateString(L"Xdows.Model.EICAR");
+            if (CanWriteVerdict(inputSize))
+                result->Verdict = XdowsModelNativeVerdictMalware;
             return true;
         }
 
@@ -1765,6 +2011,8 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
             result->Status = XdowsModelNativeStatusOk;
             result->IsThreat = 0;
             result->Probability = 0.0f;
+            if (CanWriteVerdict(inputSize))
+                result->Verdict = XdowsModelNativeVerdictClean;
             return true;
         }
 
@@ -1783,7 +2031,7 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
 
             if (!RunAdaptive(nativeSession, path, head, tail, totalSize, probability, decisionMode, error))
             {
-                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"adaptive-run-failed" : error);
+                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"adaptive-run-failed" : error, inputSize);
                 return false;
             }
         }
@@ -1792,30 +2040,17 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
             std::vector<float> features;
             if (!ExtractFeaturesForMode(nativeSession->Mode, nativeSession->FeatureCount, bytes, features))
             {
-                SetError(result, XdowsModelNativeStatusUnsupportedFile, L"feature-extraction-failed");
+                SetError(result, XdowsModelNativeStatusUnsupportedFile, L"feature-extraction-failed", inputSize);
                 return false;
             }
             if (!RunOnnx(nativeSession, features, probability, error))
             {
-                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error);
+                SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error, inputSize);
                 return false;
             }
         }
 
-        result->Status = XdowsModelNativeStatusOk;
-        result->Probability = probability;
-        if (probability >= ThresholdForMode(decisionMode))
-        {
-            result->IsThreat = 1;
-            result->DetectionName = DuplicateString(
-                L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
-                std::to_wstring(static_cast<int>(probability)));
-        }
-        else
-        {
-            result->IsThreat = 0;
-        }
-
+        ApplyFinalVerdict(result, nativeSession, decisionMode, probability, inputSize);
         return true;
     }
 
@@ -1824,7 +2059,11 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeScanFile(
     const wchar_t* filePath,
     XDOWS_MODEL_NATIVE_SCAN_RESULT* result)
 {
-    ResetResult(result);
+    // 版本化 Size 协议：在 ResetResult 覆盖 Size 之前捕获调用方声明的缓冲区大小。
+    int inputSize = 0;
+    if (result != nullptr)
+        inputSize = result->Size;
+    ResetResult(result, inputSize);
 
     if (session == nullptr || filePath == nullptr || result == nullptr)
         return XdowsModelNativeStatusInvalidArgument;
@@ -1833,7 +2072,7 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeScanFile(
     std::filesystem::path path(filePath);
     if (!std::filesystem::exists(path))
     {
-        SetError(result, XdowsModelNativeStatusFileNotFound, L"file-not-found");
+        SetError(result, XdowsModelNativeStatusFileNotFound, L"file-not-found", inputSize);
         return XdowsModelNativeStatusFileNotFound;
     }
 
@@ -1841,11 +2080,11 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeScanFile(
     if (nativeSession->Mode == XdowsModelNativeModeStandard ||
         nativeSession->Mode == XdowsModelNativeModePro)
     {
-        ok = ScanViaFullRead(nativeSession, path, result);
+        ok = ScanViaFullRead(nativeSession, path, result, inputSize);
     }
     else
     {
-        ok = ScanViaRegions(nativeSession, path, result);
+        ok = ScanViaRegions(nativeSession, path, result, inputSize);
     }
 
     return ok ? XdowsModelNativeStatusOk : result->Status;

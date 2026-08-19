@@ -36,6 +36,6 @@ Consistency test:
 & 'D:\Code\Xdows-Model\tests\Invoke-NativeConsistency.ps1' -SkipBuild
 ```
 
-The test scans the same safe PE sample through the managed caller and the native DLL for Standard, Flash, and Pro modes. Threat decisions must match and probability delta must stay within the configured tolerance.
+The test scans the same safe PE sample through the managed caller and the native DLL for Standard, Flash, Pro, and Adaptive modes. Verdicts (Clean / Suspicious / Malware) and threat decisions must match, and probability delta must stay within the configured tolerance. Three-tier verdicts map `probability >= fixed threshold` to Malware, `fixed threshold > probability >= recommended threshold` to Suspicious (recommended thresholds come from `<model>.threshold.json` manifests), and lower probabilities to Clean.
 
 Do not commit live malware samples. Safe sample guidance lives in `tests\samples\README.md`.
