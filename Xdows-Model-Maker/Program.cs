@@ -303,6 +303,9 @@ internal class Program
                 Console.WriteLine("  所有模型训练完成！");
                 Console.WriteLine("*********************************************");
             }
+
+            Console.WriteLine();
+            TrainingOutputCopier.CopyToInvokerSource();
         }
         catch (Exception ex)
         {
