@@ -130,12 +130,11 @@ private static void PrintActiveThreshold(CallerMode mode)
             Console.WriteLine(
                 $"固定判毒阈值：Standard {ModelInvoker.GetThreshold(ModelMode.Standard):F2}% / " +
                 $"Flash {ModelInvoker.GetThreshold(ModelMode.Flash):F2}% / " +
-                $"Pro {ModelInvoker.GetThreshold(ModelMode.Pro):F2}%（{ModelInvoker.GetThresholdSource(ModelMode.Pro)}）");
+                $"Pro {ModelInvoker.GetThreshold(ModelMode.Pro):F2}%");
             foreach (ModelMode m in new[] { ModelMode.Standard, ModelMode.Flash, ModelMode.Pro })
             {
                 Console.WriteLine(
-                    $"推荐判毒阈值（{m}）：{ModelInvoker.GetRecommendedThreshold(m):F2}%" +
-                    $"（{ModelInvoker.GetRecommendedThresholdSource(m)}）");
+                    $"推荐判毒阈值（{m}）：{ModelInvoker.GetRecommendedThreshold(m):F2}%");
             }
             return;
         }
@@ -149,9 +148,9 @@ private static void PrintActiveThreshold(CallerMode mode)
         };
 
         Console.WriteLine(
-            $"固定判毒阈值：{ModelInvoker.GetThreshold(modelMode):F2}%（{ModelInvoker.GetThresholdSource(modelMode)}）");
+            $"固定判毒阈值：{ModelInvoker.GetThreshold(modelMode):F2}%");
         Console.WriteLine(
-            $"推荐判毒阈值：{ModelInvoker.GetRecommendedThreshold(modelMode):F2}%（{ModelInvoker.GetRecommendedThresholdSource(modelMode)}）");
+            $"推荐判毒阈值：{ModelInvoker.GetRecommendedThreshold(modelMode):F2}%");
     }
 
     private static IScanEngine CreateEngine(CallerOptions options) =>
