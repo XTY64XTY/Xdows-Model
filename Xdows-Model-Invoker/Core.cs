@@ -475,19 +475,21 @@ namespace Xdows_Model_Invoker
         private static void ValidateProFeatureDimension()
         {
             int featureCount = GetProFeatureDimension();
-            if (featureCount == FeatureSchema.ProFusionFeatureCount)
+            if (featureCount == FeatureSchema.ProFusionFeatureCount ||
+                featureCount == FeatureSchema.ProLegacyFusionFeatureCount)
             {
                 if (string.IsNullOrEmpty(_loadedModelPath))
                     throw new InvalidOperationException("Pro 融合模型路径不可用。");
                 _proEnsemble?.Dispose();
-                _proEnsemble = new ProEnsembleSession(_loadedModelPath);
+                _proEnsemble = new ProEnsembleSession(_loadedModelPath, featureCount);
                 return;
             }
 
-            if (featureCount != FeatureSchema.ProHybridFeatureCount)
+            if (featureCount != FeatureSchema.ProHybridFeatureCount &&
+                featureCount != FeatureSchema.ProLegacyHybridFeatureCount)
             {
                 throw new InvalidOperationException(
-                    $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，期望 {FeatureSchema.ProHybridFeatureCount} 维。请重新训练并导出新的 Xdows-Model-Pro.onnx。");
+                    $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，期望 {FeatureSchema.ProHybridFeatureCount} 维（新版五分支）或 {FeatureSchema.ProLegacyHybridFeatureCount} 维（旧版）。请重新训练并导出新的 Xdows-Model-Pro.onnx。");
             }
         }
 

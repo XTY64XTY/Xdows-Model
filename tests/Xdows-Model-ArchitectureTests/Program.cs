@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.ML;
+using Xdows_Model_ArchitectureTests;
 using Xdows_Model_Config;
 using Xdows_Model_Invoker;
 using Xdows_Model_Maker;
@@ -76,6 +77,7 @@ AssertThresholdManifestRejection();
 AssertThreeTierVerdict();
 AssertProParallelScoringEquivalence();
 AssertTrainingThreadResolution();
+ProImportBehaviorArchitectureTests.Run(peSamplePath);
 Console.WriteLine("PASS: Standard training policy preserves class balance and optimizes recall under an FPR cap.");
 Console.WriteLine("PASS: Pro training reuses prepared features and branch copies preserve feature values.");
 Console.WriteLine("PASS: Threshold sweep matches the exhaustive per-row confusion matrix.");

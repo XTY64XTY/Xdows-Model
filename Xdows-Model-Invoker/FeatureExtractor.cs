@@ -1417,6 +1417,9 @@ public static class ProHybridFeatureExtractor
         idx += ProRawStatFeatures.TotalCount;
 
         ExtractStructuralFeatures(bytes).AsSpan().CopyTo(span.Slice(idx, ProHybridFileFeatures.StructuralFeatureCount));
+        idx += ProHybridFileFeatures.StructuralFeatureCount;
+
+        ImportFeatureExtractor.ExtractFromBytes(bytes).WriteTo(span.Slice(idx, FeatureSchema.ProImportBehaviorCount));
 
         return result;
     }

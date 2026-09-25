@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using Xdows_Model_Invoker;
 
 namespace Xdows_Model_Maker;
@@ -38,6 +39,7 @@ internal sealed class ProFeatureCache
             {
                 var fd = fileData[i];
                 float[] features;
+                string? contentHash = fd.ContentHash;
                 if (fd.ProFeatures is { } precomputedFeatures &&
                     precomputedFeatures.Length == ProHybridFileFeatures.FeatureCount)
                 {
@@ -51,9 +53,12 @@ internal sealed class ProFeatureCache
                 {
                     byte[] bytes = File.ReadAllBytes(fd.FilePath);
                     features = ProHybridFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray();
+                    // 加载阶段没算过内容哈希（例如 Standard 模式加载后改训 Pro）时补算一次，
+                    // 数据已经读进内存，不需要额外的磁盘 IO。
+                    contentHash ??= Convert.ToHexString(SHA256.HashData(bytes));
                 }
 
-                entries[i] = new ProFeatureCacheEntry(fd.FilePath, fd.Label, features);
+                entries[i] = new ProFeatureCacheEntry(fd.FilePath, fd.Label, features, contentHash);
             }
             catch
             {
@@ -82,14 +87,19 @@ internal sealed class ProFeatureCacheEntry
     public ProFeatureCacheEntry(
         string filePath,
         bool label,
-        float[] features)
+        float[] features,
+        string? contentHash)
     {
         FilePath = filePath;
         Label = label;
         Features = features;
+        ContentHash = contentHash;
     }
 
     public string FilePath { get; }
     public bool Label { get; }
     public float[] Features { get; }
+
+    /// <summary>文件内容的 SHA-256 摘要；数据加载阶段未计算时为 null。</summary>
+    public string? ContentHash { get; }
 }

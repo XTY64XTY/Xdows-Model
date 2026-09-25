@@ -43,6 +43,10 @@
     <Content Include="Xdows-Model-Pro-RawStat.onnx" Condition="Exists('Xdows-Model-Pro-RawStat.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
 <EmbeddedResource Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')" />
     <Content Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <EmbeddedResource Include="Xdows-Model-Pro-ImportBehavior.onnx" Condition="Exists('Xdows-Model-Pro-ImportBehavior.onnx')" />
+    <Content Include="Xdows-Model-Pro-ImportBehavior.onnx" Condition="Exists('Xdows-Model-Pro-ImportBehavior.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <EmbeddedResource Include="Xdows-Model-Pro.manifest.json" Condition="Exists('Xdows-Model-Pro.manifest.json')" />
+    <Content Include="Xdows-Model-Pro.manifest.json" Condition="Exists('Xdows-Model-Pro.manifest.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
     <EmbeddedResource Include="Xdows-Model.threshold.json" Condition="Exists('Xdows-Model.threshold.json')" />
     <Content Include="Xdows-Model.threshold.json" Condition="Exists('Xdows-Model.threshold.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
     <EmbeddedResource Include="Xdows-Model-Flash.threshold.json" Condition="Exists('Xdows-Model-Flash.threshold.json')" />

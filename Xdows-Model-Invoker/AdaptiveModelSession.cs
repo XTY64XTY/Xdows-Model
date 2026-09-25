@@ -17,6 +17,7 @@ public sealed class AdaptiveModelSession : IDisposable
     private readonly InferenceSession _standardSession;
     private readonly InferenceSession _proSession;
     private readonly ProEnsembleSession? _proEnsemble;
+    private readonly int _proSingleModelDimension;
     private readonly TrainingConfig _config;
     private readonly AdaptiveRecommendedThresholds _recommended;
 
@@ -31,10 +32,21 @@ public sealed class AdaptiveModelSession : IDisposable
         ValidateDimension(_flashSession, FeatureSchema.FlashFeatureCount, "Flash");
         ValidateDimension(_standardSession, FeatureSchema.StandardFeatureCount, "Standard");
         int proDimension = ProEnsembleSession.ReadFeatureDimension(_proSession);
-        if (proDimension == FeatureSchema.ProFusionFeatureCount)
-            _proEnsemble = new ProEnsembleSession(proPath);
-        else if (proDimension != FeatureSchema.ProHybridFeatureCount)
-            throw new InvalidOperationException($"Pro 模型维度为 {proDimension}，期望 {FeatureSchema.ProFusionFeatureCount} 或 {FeatureSchema.ProHybridFeatureCount}。");
+        if (proDimension == FeatureSchema.ProFusionFeatureCount ||
+            proDimension == FeatureSchema.ProLegacyFusionFeatureCount)
+        {
+            _proEnsemble = new ProEnsembleSession(proPath, proDimension);
+        }
+        else if (proDimension == FeatureSchema.ProHybridFeatureCount ||
+                 proDimension == FeatureSchema.ProLegacyHybridFeatureCount)
+        {
+            _proSingleModelDimension = proDimension;
+        }
+        else
+        {
+            throw new InvalidOperationException(
+                $"Pro 模型维度为 {proDimension}，期望融合维度 {FeatureSchema.ProFusionFeatureCount}/{FeatureSchema.ProLegacyFusionFeatureCount} 或混合特征维度 {FeatureSchema.ProHybridFeatureCount}/{FeatureSchema.ProLegacyHybridFeatureCount}。");
+        }
     }
 
     public AdaptiveScanResult ScanFile(string filePath)
@@ -72,7 +84,7 @@ public sealed class AdaptiveModelSession : IDisposable
         float[] proFeatures = AdaptiveFeatureComposer.ComposePro(bytes, standardFeatures, flashFeatures);
         float proProbability = _proEnsemble != null
             ? _proEnsemble.Predict(_proSession, proFeatures)
-            : ModelInvoker.RunProbability(_proSession, proFeatures, FeatureSchema.ProHybridFeatureCount);
+            : ModelInvoker.RunProbability(_proSession, proFeatures, _proSingleModelDimension);
         return CreateResult(proProbability, _config.ProThreshold, _recommended.Pro, ModelMode.Pro);
     }
 

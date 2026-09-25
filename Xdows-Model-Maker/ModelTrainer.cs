@@ -59,7 +59,7 @@ public class ModelTrainer
     private ITransformer? TrainPro(List<FileData> fileData, string modelPath, string? onnxPath)
     {
         Console.WriteLine("\n开始训练 Pro GBDT 混合特征模型...");
-        Console.WriteLine($"固定特征组成：Standard {FileFeatures.FeatureCount} 维 + Flash {FlashFileFeatures.FeatureCount} 维 + RawStat {ProRawStatFeatures.TotalCount} 维 + PE结构 {ProHybridFileFeatures.StructuralFeatureCount} 维");
+        Console.WriteLine($"固定特征组成：Standard {FileFeatures.FeatureCount} 维 + Flash {FlashFileFeatures.FeatureCount} 维 + RawStat {ProRawStatFeatures.TotalCount} 维 + PE结构 {ProHybridFileFeatures.StructuralFeatureCount} 维 + 导入行为 {FeatureSchema.ProImportBehaviorCount} 维");
         Console.WriteLine($"总特征维度：{ProHybridFileFeatures.FeatureCount}\n");
 
         if (_proTrainingCancelled)
@@ -85,8 +85,8 @@ public class ModelTrainer
         Console.WriteLine($"\n正在保存 Pro 模型...");
         try
         {
-            result.SaveArtifacts(_mlContext, modelPath, onnxPath);
-            Console.WriteLine($"Pro 融合模型和 4 个分支模型已保存至: {Path.GetDirectoryName(modelPath)}");
+            result.SaveArtifacts(_mlContext, modelPath, onnxPath, _config.ProThreshold);
+            Console.WriteLine($"Pro 融合模型和 {ProBranches.All.Count} 个分支模型已保存至: {Path.GetDirectoryName(modelPath)}");
         }
         catch (Exception ex)
         {
@@ -122,7 +122,10 @@ public class ModelTrainer
             }
             else
             {
-                samples.Add(new ProStackingSample(entry.Features, entry.Label));
+                samples.Add(new ProStackingSample(entry.Features, entry.Label)
+                {
+                    ContentHash = entry.ContentHash
+                });
             }
         }
 
@@ -173,7 +176,7 @@ public class ModelTrainer
                 ModelType = "Pro",
                 HybridFeatureCount = FeatureSchema.ProHybridFeatureCount,
                 FusionFeatureCount = evaluation.FeatureCount,
-                Architecture = "4x GBDT branches + OOF logistic regression fusion",
+                Architecture = "5x GBDT branches (Standard/Flash/RawStat/Structural/ImportBehavior) + OOF logistic regression fusion",
                 Samples = new
                 {
                     Total = evaluation.TotalSamples,

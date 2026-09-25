@@ -16,6 +16,7 @@ public static class AdaptiveFeatureComposer
         flashFeatures.CopyTo(result, FeatureSchema.ProFlashOffset);
         ProRawStatExtractor.ExtractFromBytes(bytes).ToFloatArray().CopyTo(result, FeatureSchema.ProRawStatOffset);
         ProHybridFeatureExtractor.ExtractStructuralFeatures(bytes).CopyTo(result, FeatureSchema.ProStructuralOffset);
+        ImportFeatureExtractor.ExtractFromBytes(bytes).WriteTo(result.AsSpan(FeatureSchema.ProImportBehaviorOffset, FeatureSchema.ProImportBehaviorCount));
         return result;
     }
 }

@@ -1,3 +1,5 @@
+using Xdows_Model_Config;
+
 namespace Xdows_Model_Maker;
 
 /// <summary>
@@ -6,19 +8,15 @@ namespace Xdows_Model_Maker;
 /// </summary>
 internal static class TrainingOutputCopier
 {
-    /// <summary>
-    /// 调用器嵌入的 ONNX 产物名（与 Xdows-Model-Invoker.csproj 的 EmbeddedResource 保持一致）。
-    /// </summary>
-    private static readonly string[] OnnxFileNames =
+    /// <summary>单个模型的 ONNX 产物名（不含 Pro 分支）。</summary>
+    private static readonly string[] SingleOnnxFileNames =
     [
         "Xdows-Model.onnx",
-        "Xdows-Model-Flash.onnx",
-        "Xdows-Model-Pro.onnx",
-        "Xdows-Model-Pro-Standard.onnx",
-        "Xdows-Model-Pro-Flash.onnx",
-        "Xdows-Model-Pro-RawStat.onnx",
-        "Xdows-Model-Pro-Structural.onnx"
+        "Xdows-Model-Flash.onnx"
     ];
+
+    /// <summary>Pro 融合模型文件名；分支模型名与清单名都由它推导。</summary>
+    private const string ProFusionFileName = "Xdows-Model-Pro.onnx";
 
     private static readonly string[] ThresholdManifestNames =
     [
@@ -26,6 +24,22 @@ internal static class TrainingOutputCopier
         "Xdows-Model-Flash.threshold.json",
         "Xdows-Model-Pro.threshold.json"
     ];
+
+    /// <summary>
+    /// 需要复制的 ONNX 产物名。Pro 分支与模型清单从 <see cref="ProBranches"/> /
+    /// <see cref="ProModelManifest"/> 推导，新增分支时不会漏复制而让推理端加载失败。
+    /// 公开给架构测试，用来锁住"复制清单必须覆盖全部分支 + 清单"这条约定。
+    /// </summary>
+    internal static IEnumerable<string> EnumerateOnnxFileNames()
+    {
+        foreach (string fileName in SingleOnnxFileNames)
+            yield return fileName;
+
+        yield return ProFusionFileName;
+        foreach (ProBranch branch in ProBranches.All)
+            yield return ProBranches.FileNameFor(branch, ProFusionFileName);
+        yield return ProModelManifest.FileNameFor(ProFusionFileName);
+    }
 
     /// <summary>
     /// 把训练输出目录（AppContext.BaseDirectory）中的产物复制到调用器源目录。
@@ -42,7 +56,7 @@ internal static class TrainingOutputCopier
         }
 
         var copied = new List<string>();
-        foreach (string fileName in OnnxFileNames.Concat(ThresholdManifestNames))
+        foreach (string fileName in EnumerateOnnxFileNames().Concat(ThresholdManifestNames))
         {
             string sourcePath = Path.Combine(baseDir, fileName);
             if (!File.Exists(sourcePath))

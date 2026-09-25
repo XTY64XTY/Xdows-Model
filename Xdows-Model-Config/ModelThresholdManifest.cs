@@ -137,3 +137,10 @@ public sealed class ModelThresholdManifest
 [JsonSourceGenerationOptions(WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(ModelThresholdManifest))]
 internal sealed partial class ModelThresholdManifestJsonContext : JsonSerializerContext;
+
+/// <summary>
+/// Pro 模型清单的源生成序列化上下文（独立命名，避免改动既有阈清单上下文的使用点）。
+/// </summary>
+[JsonSourceGenerationOptions(WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+[JsonSerializable(typeof(ProModelManifest))]
+internal sealed partial class ModelManifestJsonContext : JsonSerializerContext;

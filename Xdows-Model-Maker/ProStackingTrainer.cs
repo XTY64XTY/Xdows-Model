@@ -4,15 +4,17 @@ using Xdows_Model_Config;
 
 namespace Xdows_Model_Maker;
 
-internal enum ProBranch
+internal sealed record ProStackingSample(float[] Features, bool Label)
 {
-    Standard,
-    Flash,
-    RawStat,
-    Structural
-}
+    /// <summary>可选的分组键（如恶意软件家族）：同组样本不会被切分到训练/测试两侧。</summary>
+    public string? GroupKey { get; init; }
 
-internal sealed record ProStackingSample(float[] Features, bool Label);
+    /// <summary>可选的时间排序键（如 PE 时间戳），供 <see cref="ProDatasetSplitMode.TimeOrdered"/> 使用。</summary>
+    public long? TimeKey { get; init; }
+
+    /// <summary>文件内容的 SHA-256 摘要，用于剔除完全重复的样本；缺失时该样本不参与去重。</summary>
+    public string? ContentHash { get; init; }
+}
 
 internal sealed record ProBranchModel(ProBranch Branch, int FeatureCount, ITransformer Model, IDataView TrainingData);
 
@@ -23,18 +25,54 @@ internal sealed class ProStackingTrainingResult
     public required IReadOnlyList<ProBranchModel> BranchModels { get; init; }
     public required ProTrainingEvaluation Evaluation { get; init; }
 
-    public void SaveArtifacts(MLContext mlContext, string modelPath, string? onnxPath)
+    public void SaveArtifacts(MLContext mlContext, string modelPath, string? onnxPath, double fixedThreshold)
     {
         mlContext.Model.Save(FusionModel, FusionTrainingData.Schema, modelPath);
         foreach (var branch in BranchModels)
-            mlContext.Model.Save(branch.Model, branch.TrainingData.Schema, AddSuffix(modelPath, BranchSuffix(branch.Branch)));
+            mlContext.Model.Save(branch.Model, branch.TrainingData.Schema, ProBranches.PathFor(branch.Branch, modelPath));
 
         if (string.IsNullOrWhiteSpace(onnxPath))
             return;
 
         ExportToOnnx(mlContext, FusionModel, FusionTrainingData, onnxPath);
         foreach (var branch in BranchModels)
-            ExportToOnnx(mlContext, branch.Model, branch.TrainingData, AddSuffix(onnxPath, BranchSuffix(branch.Branch)));
+            ExportToOnnx(mlContext, branch.Model, branch.TrainingData, ProBranches.PathFor(branch.Branch, onnxPath));
+
+        var manifest = BuildManifest(onnxPath, fixedThreshold);
+        manifest.Save(onnxPath);
+        Console.WriteLine($"  Pro 模型清单已保存至: {ProModelManifest.ResolvePath(onnxPath)}");
+    }
+
+    private ProModelManifest BuildManifest(string fusionOnnxPath, double fixedThreshold)
+    {
+        return new ProModelManifest
+        {
+            SchemaVersion = ProModelManifest.CurrentSchemaVersion,
+            ModelVersion = typeof(ProStackingTrainingResult).Assembly.GetName().Version?.ToString() ?? "unknown",
+            FeatureSchemaVersion = FeatureSchema.Version,
+            FeatureCount = FeatureSchema.ProHybridFeatureCount,
+            FeatureHash = ProBranches.ComputeFeatureLayoutHash(),
+            FusionModelFileName = Path.GetFileName(fusionOnnxPath),
+            FusionInputCount = BranchModels.Count,
+            Branches = BranchModels
+                .OrderBy(branch => (int)branch.Branch)
+                .Select(branch => new ProBranchManifestEntry
+                {
+                    Name = branch.Branch.ToString(),
+                    FileName = ProBranches.FileNameFor(branch.Branch, fusionOnnxPath),
+                    InputDimension = branch.FeatureCount,
+                    FeatureOffset = ProBranches.Offset(branch.Branch),
+                    FeatureCount = branch.FeatureCount
+                })
+                .ToList(),
+            HashAlgorithm = ImportHashConfig.Algorithm,
+            HashSeed = ImportHashConfig.Seed,
+            DllHashDimensions = ImportHashConfig.DllHashDimensions,
+            ApiHashDimensions = ImportHashConfig.ApiHashDimensions,
+            Threshold = fixedThreshold,
+            RecommendedThreshold = Evaluation.OperatingThreshold,
+            GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+        };
     }
 
     private static void ExportToOnnx(MLContext mlContext, ITransformer model, IDataView data, string path)
@@ -42,26 +80,11 @@ internal sealed class ProStackingTrainingResult
         using var stream = File.Create(path);
         mlContext.Model.ConvertToOnnx(model, data, stream);
     }
-
-    internal static string AddSuffix(string path, string suffix)
-    {
-        string directory = Path.GetDirectoryName(path) ?? string.Empty;
-        return Path.Combine(directory, Path.GetFileNameWithoutExtension(path) + suffix + Path.GetExtension(path));
-    }
-
-    internal static string BranchSuffix(ProBranch branch) => branch switch
-    {
-        ProBranch.Standard => "-Standard",
-        ProBranch.Flash => "-Flash",
-        ProBranch.RawStat => "-RawStat",
-        ProBranch.Structural => "-Structural",
-        _ => throw new ArgumentOutOfRangeException(nameof(branch))
-    };
 }
 
 internal sealed class ProStackingTrainer
 {
-    private static readonly ProBranch[] Branches = Enum.GetValues<ProBranch>();
+    private static readonly ProBranch[] Branches = ProBranches.All.ToArray();
     private const int RequestedFoldCount = 5;
     private const int MinimumSamplesForParallelBranches = 4_096;
     private readonly MLContext _mlContext;
@@ -79,28 +102,33 @@ internal sealed class ProStackingTrainer
 
     public ProStackingTrainingResult Train(IReadOnlyList<ProStackingSample> samples)
     {
-        var (trainIndices, testIndices) = CreateStratifiedHoldout(samples, 0.2, _config.RandomSeed ?? 43846);
-        int minorityTrainCount = Math.Min(trainIndices.Count(i => samples[i].Label), trainIndices.Count(i => !samples[i].Label));
+        ProDatasetSplitResult split = ProDatasetSplitter.Split(samples, _config);
+        IReadOnlyList<ProStackingSample> data = split.Samples;
+        IReadOnlyList<int> trainIndices = split.TrainIndices;
+        IReadOnlyList<int> testIndices = split.TestIndices;
+
+        int minorityTrainCount = Math.Min(trainIndices.Count(i => data[i].Label), trainIndices.Count(i => !data[i].Label));
         int foldCount = Math.Min(RequestedFoldCount, minorityTrainCount);
         if (foldCount < 2)
             throw new InvalidOperationException("Pro Stacking 至少需要每类 3 个有效样本。");
 
-        Console.WriteLine($"  Pro 架构：4 路 GBDT + Logistic Regression 融合，OOF={foldCount} 折");
-        int parallelBranchCount = samples.Count >= MinimumSamplesForParallelBranches
+        Console.WriteLine($"  Pro 架构：{Branches.Length} 路 GBDT + Logistic Regression 融合，OOF={foldCount} 折");
+        int parallelBranchCount = data.Count >= MinimumSamplesForParallelBranches
             ? _maxParallelBranchCount
             : 1;
         int trainingThreadCount = TrainingHardware.ResolveTrainingThreadCount(_config.TrainingThreadCount);
         int threadsPerBranch = Math.Max(1, trainingThreadCount / parallelBranchCount);
         Console.WriteLine($"  Pro 并行度：{parallelBranchCount} 个分支，LightGBM 每分支线程：{threadsPerBranch}");
-        var folds = CreateStratifiedFolds(samples, trainIndices, foldCount, (_config.RandomSeed ?? 43846) + 1);
-        var oofRows = new List<ProFusionTrainingData>(trainIndices.Length);
+        var folds = CreateStratifiedFolds(data, trainIndices, foldCount, (_config.RandomSeed ?? 43846) + 1);
+        ProDatasetReporter.Print(split, foldCount);
+        var oofRows = new List<ProFusionTrainingData>(trainIndices.Count);
 
         for (int fold = 0; fold < folds.Count; fold++)
         {
             var validationSet = folds[fold].ToHashSet();
             var foldTraining = trainIndices.Where(i => !validationSet.Contains(i)).ToArray();
-            var branchModels = TrainBranches(samples, foldTraining, parallelBranchCount, threadsPerBranch);
-            oofRows.AddRange(ScoreSamples(samples, folds[fold], branchModels));
+            var branchModels = TrainBranches(data, foldTraining, parallelBranchCount, threadsPerBranch);
+            oofRows.AddRange(ScoreSamples(data, folds[fold], branchModels));
             Console.WriteLine($"  OOF 进度：{fold + 1}/{folds.Count}");
         }
 
@@ -110,8 +138,8 @@ internal sealed class ProStackingTrainer
             featureColumnName: nameof(ProFusionTrainingData.Features));
         ITransformer fusionModel = fusionPipeline.Fit(fusionTrainingData);
 
-        var finalBranches = TrainBranches(samples, trainIndices, parallelBranchCount, threadsPerBranch);
-        List<ProFusionTrainingData> testRows = ScoreSamples(samples, testIndices, finalBranches);
+        var finalBranches = TrainBranches(data, trainIndices, parallelBranchCount, threadsPerBranch);
+        List<ProFusionTrainingData> testRows = ScoreSamples(data, testIndices, finalBranches);
 
         IDataView testData = _mlContext.Data.LoadFromEnumerable(testRows);
         var testPredictions = fusionModel.Transform(testData);
@@ -142,7 +170,7 @@ internal sealed class ProStackingTrainer
                 $"若要让线上工作点与本次校准一致，请把 ProThreshold 改为 {operatingThreshold:F2}。");
         }
         int blackSampleCount = 0;
-        foreach (var sample in samples)
+        foreach (var sample in data)
         {
             if (sample.Label)
                 blackSampleCount++;
@@ -161,9 +189,9 @@ internal sealed class ProStackingTrainer
                 thresholdMetrics,
                 bestMetrics,
                 bestThreshold,
-                samples.Count,
+                data.Count,
                 blackSampleCount,
-                samples.Count - blackSampleCount,
+                data.Count - blackSampleCount,
                 FeatureSchema.ProFusionFeatureCount,
                 operatingThreshold,
                 costSelection,
@@ -264,55 +292,15 @@ internal sealed class ProStackingTrainer
 
     internal static float[] ExtractBranch(float[] features, ProBranch branch)
     {
-        var result = new float[BranchFeatureCount(branch)];
-        CopyBranch(features, branch, result);
-        return result;
+        return ProBranches.Extract(features, branch);
     }
 
     internal static void CopyBranch(float[] features, ProBranch branch, Span<float> destination)
     {
-        var (offset, count) = branch switch
-        {
-            ProBranch.Standard => (FeatureSchema.ProStandardOffset, FeatureSchema.StandardFeatureCount),
-            ProBranch.Flash => (FeatureSchema.ProFlashOffset, FeatureSchema.FlashFeatureCount),
-            ProBranch.RawStat => (FeatureSchema.ProRawStatOffset, FeatureSchema.ProRawStatCount),
-            ProBranch.Structural => (FeatureSchema.ProStructuralOffset, FeatureSchema.ProStructuralCount),
-            _ => throw new ArgumentOutOfRangeException(nameof(branch))
-        };
-        if (destination.Length != count)
-            throw new ArgumentException("Pro branch destination length mismatch.", nameof(destination));
-        features.AsSpan(offset, count).CopyTo(destination);
+        ProBranches.Copy(features, branch, destination);
     }
 
-    internal static int BranchFeatureCount(ProBranch branch) => branch switch
-    {
-        ProBranch.Standard => FeatureSchema.StandardFeatureCount,
-        ProBranch.Flash => FeatureSchema.FlashFeatureCount,
-        ProBranch.RawStat => FeatureSchema.ProRawStatCount,
-        ProBranch.Structural => FeatureSchema.ProStructuralCount,
-        _ => throw new ArgumentOutOfRangeException(nameof(branch))
-    };
-
-    private static (int[] Train, int[] Test) CreateStratifiedHoldout(IReadOnlyList<ProStackingSample> samples, double testFraction, int seed)
-    {
-        var random = new Random(seed);
-        var train = new List<int>();
-        var test = new List<int>();
-        foreach (bool label in new[] { false, true })
-        {
-            var indices = samples.Select((sample, index) => (sample, index))
-                .Where(x => x.sample.Label == label)
-                .Select(x => x.index)
-                .OrderBy(_ => random.Next())
-                .ToArray();
-            if (indices.Length < 2)
-                throw new InvalidOperationException("Pro Stacking 的每个类别至少需要 2 个样本。");
-            int testCount = Math.Clamp((int)Math.Round(indices.Length * testFraction), 1, indices.Length - 1);
-            test.AddRange(indices.Take(testCount));
-            train.AddRange(indices.Skip(testCount));
-        }
-        return (train.OrderBy(_ => random.Next()).ToArray(), test.OrderBy(_ => random.Next()).ToArray());
-    }
+    internal static int BranchFeatureCount(ProBranch branch) => ProBranches.FeatureCount(branch);
 
     private static List<int[]> CreateStratifiedFolds(IReadOnlyList<ProStackingSample> samples, IReadOnlyList<int> indices, int foldCount, int seed)
     {

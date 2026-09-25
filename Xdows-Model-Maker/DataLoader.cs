@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using Xdows_Model_Config;
 using Xdows_Model_Invoker;
 
@@ -118,31 +119,34 @@ public class DataLoader
                 Label = isBlack
             };
 
+            byte[] bytes = await File.ReadAllBytesAsync(file);
+
+            // 内容哈希只在 Pro 数据加载模式下计算：Pro 训练需要它做重复样本去重，
+            // Standard / Flash 训练用不到，避免让大目录的数据加载多付一遍哈希开销。
+            if (_currentMode is DataLoadMode.ProOnly or DataLoadMode.All)
+                fileData.ContentHash = Convert.ToHexString(SHA256.HashData(bytes));
+
             switch (_currentMode)
             {
                 case DataLoadMode.ProOnly:
                     {
-                        var bytes = await File.ReadAllBytesAsync(file);
                         fileData.ProFeaturesAttempted = true;
                         fileData.ProFeatures = ProHybridFeatureExtractor.ExtractFromBytes(bytes).ToFloatArray();
                     }
                     break;
                 case DataLoadMode.FlashOnly:
                     {
-                        var bytes = await File.ReadAllBytesAsync(file);
                         fileData.FlashFeatures = FlashFeatureExtractor.ExtractFromBytes(bytes);
                     }
                     break;
                 case DataLoadMode.Standard:
                     {
-                        var bytes = await File.ReadAllBytesAsync(file);
                         fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
                     }
                     break;
                 case DataLoadMode.Both:
                 case DataLoadMode.All:
                     {
-                        var bytes = await File.ReadAllBytesAsync(file);
                         fileData.Features = FeatureExtractor.ExtractFromBytes(bytes);
                         bool flashFeaturesAvailable = true;
                         try
@@ -167,7 +171,7 @@ public class DataLoader
                                         fileData.Features.ToFloatArray(),
                                         fileData.FlashFeatures.ToFloatArray());
                                 }
-                                catch
+                                catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
                                 {
                                     fileData.ProFeatures = null;
                                 }
