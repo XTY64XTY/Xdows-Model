@@ -23,6 +23,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -34,8 +35,41 @@ namespace
     constexpr int kProRawStatFeatureCount = kProRawStatFeaturesPerSection * kProRawStatSectionCount;
     constexpr int kProRawStatSectionSize = 512;
     constexpr int kProStructuralFeatureCount = 32;
-    constexpr int kProFixedFeatureCount = kStandardFeatureCount + kFlashFeatureCount + kProStructuralFeatureCount;
-    constexpr int kProHybridFeatureCount = kProFixedFeatureCount + kProRawStatFeatureCount;
+
+    // ImportBehavior 特征组（Schema v3）。DLL/API 名哈希分桶维度、哈希算法与种子
+    // 必须与 Managed 的 ImportHashConfig 完全一致，否则原生与托管的特征会分叉。
+    constexpr int kProImportDllHashDimensions = 512;
+    constexpr int kProImportApiHashDimensions = 4096;
+    constexpr int kProImportStatsCount = 16;
+    constexpr int kProImportBehaviorFeatureCount =
+        kProImportDllHashDimensions + kProImportApiHashDimensions + kProImportStatsCount;
+    constexpr std::uint32_t kImportHashSeed = 2166136261u;
+    constexpr std::uint32_t kImportHashPrime = 16777619u;
+    constexpr int kProMaxImportDescriptors = 4096;
+    constexpr int kProMaxApisPerDll = 65535;
+    constexpr int kProMaxTotalApis = 1000000;
+    constexpr int kProMaxImportNameBytes = 512;
+
+    // Pro 分支布局。特征是追加式布局：ImportBehavior 接在旧四段之后，
+    // 因此旧版（Schema v2）的偏移与总维度原样保留。分支顺序即融合特征向量的顺序。
+    constexpr int kProImportBehaviorOffset =
+        kStandardFeatureCount + kFlashFeatureCount + kProRawStatFeatureCount + kProStructuralFeatureCount;
+    constexpr int kProLegacyHybridFeatureCount = kProImportBehaviorOffset;
+    constexpr int kProHybridFeatureCount = kProLegacyHybridFeatureCount + kProImportBehaviorFeatureCount;
+    constexpr int kProLegacyBranchCount = 4;
+    constexpr int kProBranchCount = 5;
+
+    // Pro 的 FeatureCount 语义是"融合模型输入维度 = 分支数"，而不是混合特征维度。
+    constexpr bool IsProFusionBranchCount(int featureCount)
+    {
+        return featureCount == kProLegacyBranchCount || featureCount == kProBranchCount;
+    }
+
+    constexpr int ProHybridFeatureCountForBranchCount(int branchCount)
+    {
+        return branchCount == kProBranchCount ? kProHybridFeatureCount : kProLegacyHybridFeatureCount;
+    }
+
     constexpr size_t kFlashRegionSize = 512ULL * 1024ULL;
     constexpr size_t kBlockEntropyRegionSize = 128ULL * 1024ULL;
 
@@ -85,15 +119,18 @@ struct PeLayout
         Ort::Env Env;
         Ort::SessionOptions Options;
         std::unique_ptr<Ort::Session> Session;
-        std::array<std::unique_ptr<Ort::Session>, 4> ProBranchSessions;
+        // 分支槽位按新版五分支预留，ProBranchCount 决定实际加载几个（旧版四分支为 4）。
+        std::array<std::unique_ptr<Ort::Session>, kProBranchCount> ProBranchSessions;
+        int ProBranchCount = 0;
         std::unique_ptr<NativeSession> AdaptiveFlash;
         std::unique_ptr<NativeSession> AdaptiveStandard;
         std::unique_ptr<NativeSession> AdaptivePro;
-        std::array<int, 4> ProBranchFeatureCounts{
+        std::array<int, kProBranchCount> ProBranchFeatureCounts{
             kStandardFeatureCount,
             kFlashFeatureCount,
             kProRawStatFeatureCount,
-            kProStructuralFeatureCount };
+            kProStructuralFeatureCount,
+            kProImportBehaviorFeatureCount };
 
         NativeSession(int mode, int featureCount, const std::filesystem::path& modelPath)
             : Mode(mode),
@@ -115,9 +152,11 @@ Options.SetIntraOpNumThreads(1);
                     XdowsModelNativeModeStandard,
                     kStandardFeatureCount,
                     directory / L"Xdows-Model.onnx");
-AdaptivePro = std::make_unique<NativeSession>(
+                // Pro 子会话的 FeatureCount 是融合模型输入维度（= 分支数），
+                // 这里只是构造初值，真实值由 Pro 子会话从融合模型元数据读取。
+                AdaptivePro = std::make_unique<NativeSession>(
                     XdowsModelNativeModePro,
-                    kProHybridFeatureCount,
+                    kProLegacyBranchCount,
                     directory / L"Xdows-Model-Pro.onnx");
                 RecommendedThreshold = ThresholdForMode(XdowsModelNativeModeStandard);
                 TryLoadRecommendedThreshold(ModelPath, XdowsModelNativeModeStandard, RecommendedThreshold);
@@ -128,18 +167,28 @@ AdaptivePro = std::make_unique<NativeSession>(
 
             FeatureCount = ReadFeatureCount(*Session, FeatureCount);
 
-            if (Mode == XdowsModelNativeModePro && FeatureCount == 4)
+            // Pro 的 FeatureCount 是融合模型输入维度，也就是分支数：
+            // 4 = 旧版四分支（混合特征 519 维），5 = 新版五分支（混合特征 5143 维，含 ImportBehavior）。
+            // 两者之外的维度说明模型与运行库不匹配，直接判定为不可用，不在扫描期静默退化。
+            if (Mode == XdowsModelNativeModePro && !IsProFusionBranchCount(FeatureCount))
+                throw std::runtime_error("pro-fusion-input-count-unexpected");
+
+            if (Mode == XdowsModelNativeModePro)
             {
-                const std::array<std::wstring, 4> suffixes{
-                    L"-Standard", L"-Flash", L"-RawStat", L"-Structural" };
-                for (size_t i = 0; i < suffixes.size(); i++)
+                static constexpr std::array<const wchar_t*, kProBranchCount> suffixes{
+                    L"-Standard", L"-Flash", L"-RawStat", L"-Structural", L"-ImportBehavior" };
+
+                ProBranchCount = FeatureCount;
+                for (int i = 0; i < ProBranchCount; i++)
                 {
-                    std::filesystem::path branchPath = AddSuffix(ModelPath, suffixes[i]);
+                    size_t branchIndex = static_cast<size_t>(i);
+                    std::filesystem::path branchPath = AddSuffix(ModelPath, suffixes[branchIndex]);
                     if (!std::filesystem::exists(branchPath))
                         throw std::runtime_error("missing-pro-stacking-branch");
-                    ProBranchSessions[i] = std::make_unique<Ort::Session>(Env, branchPath.c_str(), Options);
-                    int actual = ReadFeatureCount(*ProBranchSessions[i], ProBranchFeatureCounts[i]);
-                    if (actual != ProBranchFeatureCounts[i])
+                    ProBranchSessions[branchIndex] =
+                        std::make_unique<Ort::Session>(Env, branchPath.c_str(), Options);
+                    int actual = ReadFeatureCount(*ProBranchSessions[branchIndex], ProBranchFeatureCounts[branchIndex]);
+                    if (actual != ProBranchFeatureCounts[branchIndex])
                         throw std::runtime_error("pro-stacking-branch-dimension-mismatch");
                 }
             }
@@ -236,6 +285,17 @@ AdaptivePro = std::make_unique<NativeSession>(
     std::int32_t ReadInt32(const std::vector<std::uint8_t>& bytes, size_t offset)
     {
         return static_cast<std::int32_t>(ReadUInt32(bytes, offset));
+    }
+
+    std::uint64_t ReadUInt64(const std::vector<std::uint8_t>& bytes, size_t offset)
+    {
+        if (offset + 8 > bytes.size())
+            return 0;
+
+        std::uint64_t value = 0;
+        for (int i = 7; i >= 0; i--)
+            value = (value << 8) | static_cast<std::uint64_t>(bytes[offset + static_cast<size_t>(i)]);
+        return value;
     }
 
     bool IsPeFile(const std::vector<std::uint8_t>& bytes)
@@ -1059,11 +1119,6 @@ AdaptivePro = std::make_unique<NativeSession>(
         AppendFlashFeaturesFromUnified(bytes, unified, features);
     }
 
-    bool IsProFeatureCount(int featureCount)
-    {
-        return featureCount == kProHybridFeatureCount;
-    }
-
     void AppendProSectionStats(const std::vector<std::uint8_t>& bytes, size_t start, size_t length,
                                 size_t fileSize, std::vector<float>& features, size_t offset)
     {
@@ -1306,6 +1361,485 @@ AdaptivePro = std::make_unique<NativeSession>(
         features.insert(features.end(), values.begin(), values.end());
     }
 
+    // ---------------------------------------------------------------------------------
+    // ImportBehavior 特征组（Schema v3 第 5 段）
+    //
+    // 与 Managed 的 ImportFeatureExtractor 逐条对齐：同样的 PE 解析、同样的 RVA 映射、
+    // 同样的字符串规范化、同样的 FNV-1a 哈希与桶数、同样的 16 个统计量顺序。
+    // 两边产出必须逐位一致，否则同一模型在原生与托管链路上会得到不同结果。
+    // 任何规则改动都必须同步提升 FeatureSchema.Version 并重新训练模型。
+    // ---------------------------------------------------------------------------------
+
+    enum ImportParseStatus
+    {
+        ImportParseStatusOk = 0,
+        ImportParseStatusNoImportTable = 1,
+        ImportParseStatusTruncated = 2,
+        ImportParseStatusInvalid = 3
+    };
+
+    struct ImportBehaviorFeatures
+    {
+        std::array<float, kProImportDllHashDimensions> DllBuckets{};
+        std::array<float, kProImportApiHashDimensions> ApiBuckets{};
+        std::array<float, kProImportStatsCount> Stats{};
+        ImportParseStatus Status = ImportParseStatusNoImportTable;
+        int DllCount = 0;
+        int ApiCount = 0;
+        int DelayDllCount = 0;
+        int DelayApiCount = 0;
+    };
+
+    // 与 Managed ImportHashConfig 一致：DLL 名 Trim + 转小写，API 名只 Trim（PE 导入名区分大小写）。
+    bool IsTrimCharacter(std::uint8_t value)
+    {
+        return value == 9 || value == 10 || value == 11 || value == 12 || value == 13 || value == 32;
+    }
+
+    std::string TrimImportName(const std::string& value)
+    {
+        size_t begin = 0;
+        size_t end = value.size();
+        while (begin < end && IsTrimCharacter(static_cast<std::uint8_t>(value[begin])))
+            begin++;
+        while (end > begin && IsTrimCharacter(static_cast<std::uint8_t>(value[end - 1])))
+            end--;
+        return value.substr(begin, end - begin);
+    }
+
+    std::string NormalizeImportDllName(const std::string& name)
+    {
+        std::string trimmed = TrimImportName(name);
+        for (char& c : trimmed)
+        {
+            if (c >= 'A' && c <= 'Z')
+                c = static_cast<char>(c - 'A' + 'a');
+        }
+        return trimmed;
+    }
+
+    std::string NormalizeImportApiName(const std::string& name)
+    {
+        return TrimImportName(name);
+    }
+
+    // 32 位 FNV-1a，种子与算法与 Managed ImportHashConfig 完全一致。
+    int ImportHashToBucket(const std::string& value, int dimensions)
+    {
+        std::uint32_t hash = kImportHashSeed;
+        for (unsigned char c : value)
+        {
+            hash ^= static_cast<std::uint32_t>(c);
+            hash *= kImportHashPrime;
+        }
+        return static_cast<int>(hash % static_cast<std::uint32_t>(dimensions));
+    }
+
+    // 轻量 PE 导入上下文：节表驱动的 RVA -> 文件偏移映射。与 Managed PeImportContext 语义一致。
+    struct PeImportContext
+    {
+        const std::vector<std::uint8_t>* Bytes = nullptr;
+        bool IsPe32Plus = false;
+        std::uint32_t ImportDirectoryRva = 0;
+        std::uint32_t ImportDirectorySize = 0;
+        std::uint32_t DelayImportDirectoryRva = 0;
+        std::uint32_t SizeOfHeaders = 0;
+        // 每项为 {VirtualAddress, VirtualSize, RawSize, RawOffset}
+        std::vector<std::array<std::uint32_t, 4>> Sections;
+
+        bool TryMapRva(std::uint32_t rva, size_t& fileOffset) const
+        {
+            fileOffset = 0;
+            if (Bytes == nullptr)
+                return false;
+
+            if (rva < SizeOfHeaders && static_cast<size_t>(rva) < Bytes->size())
+            {
+                fileOffset = rva;
+                return true;
+            }
+
+            for (const auto& section : Sections)
+            {
+                std::uint32_t virtualAddress = section[0];
+                std::uint32_t span = std::max(section[1], section[2]);
+                if (span == 0 || rva < virtualAddress || rva - virtualAddress >= span)
+                    continue;
+
+                std::uint64_t offset = static_cast<std::uint64_t>(section[3]) + (rva - virtualAddress);
+                if (offset >= Bytes->size())
+                    return false;
+
+                fileOffset = static_cast<size_t>(offset);
+                return true;
+            }
+
+            return false;
+        }
+
+        bool TryReadAsciiString(std::uint32_t rva, int maxBytes, bool skipHint, std::string& value) const
+        {
+            value.clear();
+            if (Bytes == nullptr)
+                return false;
+
+            size_t offset = 0;
+            if (!TryMapRva(rva, offset))
+                return false;
+            if (skipHint)
+                offset += 2;
+            if (offset >= Bytes->size())
+                return false;
+
+            size_t limit = std::min(Bytes->size(), offset + static_cast<size_t>(maxBytes));
+            size_t end = offset;
+            while (end < limit && (*Bytes)[end] != 0)
+                end++;
+            if (end == offset)
+                return false;
+
+            value.reserve(end - offset);
+            for (size_t i = offset; i < end; i++)
+            {
+                std::uint8_t b = (*Bytes)[i];
+                // Managed 用 Encoding.ASCII，>=0x80 的字节会变成 '?'；这里必须同样处理，否则哈希会分叉。
+                value.push_back(b < 0x80 ? static_cast<char>(b) : '?');
+            }
+            return true;
+        }
+    };
+
+    bool TryCreatePeImportContext(const std::vector<std::uint8_t>& bytes, PeImportContext& context)
+    {
+        context = {};
+        if (bytes.size() < 64)
+            return false;
+
+        std::int32_t peOffset = ReadInt32(bytes, 60);
+        if (peOffset < 0 || static_cast<size_t>(peOffset) + 24 > bytes.size())
+            return false;
+        if (bytes[static_cast<size_t>(peOffset)] != 'P' || bytes[static_cast<size_t>(peOffset) + 1] != 'E')
+            return false;
+
+        std::uint16_t sectionCount = ReadUInt16(bytes, static_cast<size_t>(peOffset) + 6);
+        std::uint16_t optionalHeaderSize = ReadUInt16(bytes, static_cast<size_t>(peOffset) + 20);
+        size_t optionalHeaderOffset = static_cast<size_t>(peOffset) + 24;
+        if (optionalHeaderOffset + optionalHeaderSize > bytes.size() || optionalHeaderSize < 2)
+            return false;
+
+        std::uint16_t magic = ReadUInt16(bytes, optionalHeaderOffset);
+        bool pe32 = magic == 0x10b;
+        bool pe32Plus = magic == 0x20b;
+        if (!pe32 && !pe32Plus)
+            return false;
+
+        size_t dataDirectoryOffset = optionalHeaderOffset + (pe32 ? 96 : 112);
+        std::uint32_t numberOfRvaAndSizes = ReadUInt32(bytes, optionalHeaderOffset + (pe32 ? 92 : 108));
+        std::uint32_t sizeOfHeaders = ReadUInt32(bytes, optionalHeaderOffset + 60);
+
+        std::uint32_t importRva = 0;
+        std::uint32_t importSize = 0;
+        std::uint32_t delayImportRva = 0;
+        if (numberOfRvaAndSizes > 1 && dataDirectoryOffset + 16 <= bytes.size())
+        {
+            importRva = ReadUInt32(bytes, dataDirectoryOffset + 8);
+            importSize = ReadUInt32(bytes, dataDirectoryOffset + 12);
+        }
+        if (numberOfRvaAndSizes > 13 && dataDirectoryOffset + 8 * 14 <= bytes.size())
+            delayImportRva = ReadUInt32(bytes, dataDirectoryOffset + 8 * 13);
+
+        size_t sectionTableOffset = optionalHeaderOffset + optionalHeaderSize;
+        size_t sectionLimit = std::min<size_t>(sectionCount, 96);
+        std::vector<std::array<std::uint32_t, 4>> sections;
+        sections.reserve(sectionLimit);
+        for (size_t i = 0; i < sectionLimit; i++)
+        {
+            size_t sectionOffset = sectionTableOffset + i * 40;
+            if (sectionOffset + 40 > bytes.size())
+                break;
+
+            sections.push_back({
+                ReadUInt32(bytes, sectionOffset + 12),
+                ReadUInt32(bytes, sectionOffset + 8),
+                ReadUInt32(bytes, sectionOffset + 16),
+                ReadUInt32(bytes, sectionOffset + 20) });
+        }
+
+        context.Bytes = &bytes;
+        context.IsPe32Plus = pe32Plus;
+        context.ImportDirectoryRva = importRva;
+        context.ImportDirectorySize = importSize;
+        context.DelayImportDirectoryRva = delayImportRva;
+        context.SizeOfHeaders = sizeOfHeaders;
+        context.Sections = std::move(sections);
+        return true;
+    }
+
+    int ParseImportThunkTable(const PeImportContext& context,
+                              std::uint32_t thunkTableRva,
+                              const std::string& normalizedDll,
+                              ImportBehaviorFeatures& result,
+                              int& ordinalApiCount,
+                              int& namedApiCount)
+    {
+        size_t thunkOffset = 0;
+        if (!context.TryMapRva(thunkTableRva, thunkOffset))
+            return -1;
+
+        const int thunkSize = context.IsPe32Plus ? 8 : 4;
+        const std::uint64_t ordinalFlag = context.IsPe32Plus ? 0x8000000000000000ULL : 0x80000000ULL;
+        int apiCount = 0;
+
+        for (int index = 0; index < kProMaxApisPerDll; index++)
+        {
+            size_t offset = thunkOffset + static_cast<size_t>(index) * static_cast<size_t>(thunkSize);
+            if (offset + static_cast<size_t>(thunkSize) > context.Bytes->size())
+                break;
+
+            std::uint64_t thunkValue = context.IsPe32Plus
+                ? ReadUInt64(*context.Bytes, offset)
+                : ReadUInt32(*context.Bytes, offset);
+            if (thunkValue == 0)
+                break;
+
+            std::string apiKey;
+            if ((thunkValue & ordinalFlag) != 0)
+            {
+                apiKey = normalizedDll + "!#" + std::to_string(thunkValue & 0xFFFFULL);
+                ordinalApiCount++;
+            }
+            else
+            {
+                // 与 Managed 一致：这里固定用 31 位掩码（PE32+ 同样如此），保持逐位一致。
+                std::string apiName;
+                if (!context.TryReadAsciiString(static_cast<std::uint32_t>(thunkValue & 0x7FFFFFFFULL),
+                                                kProMaxImportNameBytes, true, apiName) ||
+                    apiName.empty())
+                {
+                    continue;
+                }
+
+                apiKey = NormalizeImportApiName(apiName);
+                namedApiCount++;
+            }
+
+            result.ApiBuckets[static_cast<size_t>(ImportHashToBucket(apiKey, kProImportApiHashDimensions))] = 1.0f;
+            apiCount++;
+        }
+
+        return apiCount;
+    }
+
+    ImportParseStatus ParseImportDirectory(const PeImportContext& context,
+                                          std::uint32_t directoryRva,
+                                          int descriptorSize,
+                                          bool isDelay,
+                                          ImportBehaviorFeatures& result,
+                                          std::unordered_set<std::string>& seenDllNames,
+                                          int& duplicateDllCount,
+                                          int& ordinalApiCount,
+                                          int& namedApiCount)
+    {
+        size_t descriptorOffset = 0;
+        if (!context.TryMapRva(directoryRva, descriptorOffset))
+            return ImportParseStatusInvalid;
+
+        const std::vector<std::uint8_t>& bytes = *context.Bytes;
+        ImportParseStatus status = ImportParseStatusOk;
+        int parsedDescriptors = 0;
+
+        for (int index = 0; index < kProMaxImportDescriptors; index++)
+        {
+            size_t offset = descriptorOffset + static_cast<size_t>(index) * static_cast<size_t>(descriptorSize);
+            if (offset + static_cast<size_t>(descriptorSize) > bytes.size())
+            {
+                status = parsedDescriptors == 0 ? ImportParseStatusInvalid : ImportParseStatusTruncated;
+                break;
+            }
+
+            std::uint32_t field0 = ReadUInt32(bytes, offset);
+            std::uint32_t nameRva = ReadUInt32(bytes, offset + static_cast<size_t>(isDelay ? 4 : 12));
+            std::uint32_t firstThunkRva = ReadUInt32(bytes, offset + static_cast<size_t>(isDelay ? 12 : 16));
+            std::uint32_t lookupThunkRva = isDelay ? ReadUInt32(bytes, offset + 16) : field0;
+
+            // 延迟导入描述符（grAttrs bit0 = 1 时字段为 RVA）。旧格式（bit0 = 0）使用虚拟地址，
+            // 这里与 Managed 一致统一按 RVA 解析，映射失败即记为截断。
+            if (isDelay && (field0 & 1) == 0)
+            {
+                if (field0 == 0 && nameRva == 0 && firstThunkRva == 0)
+                    break;
+
+                return (parsedDescriptors == 0 && result.DllCount == 0)
+                    ? ImportParseStatusInvalid
+                    : ImportParseStatusTruncated;
+            }
+
+            if (field0 == 0 && nameRva == 0 && firstThunkRva == 0 && lookupThunkRva == 0)
+                break;
+
+            parsedDescriptors++;
+            if (lookupThunkRva == 0)
+                lookupThunkRva = firstThunkRva;
+
+            std::string dllName;
+            if (!context.TryReadAsciiString(nameRva, kProMaxImportNameBytes, false, dllName) || dllName.empty())
+            {
+                status = ImportParseStatusTruncated;
+                continue;
+            }
+
+            std::string normalizedDll = NormalizeImportDllName(dllName);
+            if (!seenDllNames.insert(normalizedDll).second)
+                duplicateDllCount++;
+
+            result.DllBuckets[static_cast<size_t>(ImportHashToBucket(normalizedDll, kProImportDllHashDimensions))] = 1.0f;
+
+            if (isDelay)
+                result.DelayDllCount++;
+            else
+                result.DllCount++;
+
+            int apiCount = ParseImportThunkTable(context, lookupThunkRva, normalizedDll, result,
+                                                ordinalApiCount, namedApiCount);
+            if (apiCount < 0)
+            {
+                status = ImportParseStatusTruncated;
+                continue;
+            }
+
+            if (isDelay)
+                result.DelayApiCount += apiCount;
+            else
+                result.ApiCount += apiCount;
+
+            if (result.DllCount + result.DelayDllCount > kProMaxImportDescriptors ||
+                result.ApiCount + result.DelayApiCount > kProMaxTotalApis)
+            {
+                return ImportParseStatusTruncated;
+            }
+        }
+
+        if (parsedDescriptors == 0 && status == ImportParseStatusOk)
+            return ImportParseStatusInvalid;
+
+        return status;
+    }
+
+    // 统计特征布局（16 维，顺序固定，与 Managed ImportFeatureExtractor.WriteStats 一一对应）。
+    void WriteImportStats(ImportBehaviorFeatures& result,
+                          int duplicateDllCount,
+                          int ordinalApiCount,
+                          int delayOrdinalApiCount,
+                          std::uint32_t importDirectorySize,
+                          int namedApiCount)
+    {
+        int totalDlls = result.DllCount + result.DelayDllCount;
+        int totalApis = result.ApiCount + result.DelayApiCount;
+
+        int occupiedDll = 0;
+        for (float value : result.DllBuckets)
+        {
+            if (value != 0.0f)
+                occupiedDll++;
+        }
+        int occupiedApi = 0;
+        for (float value : result.ApiBuckets)
+        {
+            if (value != 0.0f)
+                occupiedApi++;
+        }
+
+        int idx = 0;
+        result.Stats[idx++] = static_cast<float>(static_cast<int>(result.Status));
+        result.Stats[idx++] = result.Status == ImportParseStatusNoImportTable ? 0.0f : 1.0f;
+        result.Stats[idx++] = static_cast<float>(std::log(static_cast<double>(result.DllCount) + 1.0));
+        result.Stats[idx++] = static_cast<float>(std::log(static_cast<double>(totalApis) + 1.0));
+        result.Stats[idx++] = result.DllCount > 0
+            ? static_cast<float>(result.ApiCount) / static_cast<float>(result.DllCount)
+            : 0.0f;
+        result.Stats[idx++] = static_cast<float>(std::log(static_cast<double>(result.DelayDllCount) + 1.0));
+        result.Stats[idx++] = static_cast<float>(std::log(static_cast<double>(result.DelayApiCount) + 1.0));
+        result.Stats[idx++] = totalApis > 0
+            ? static_cast<float>(ordinalApiCount) / static_cast<float>(totalApis)
+            : 0.0f;
+        result.Stats[idx++] = static_cast<float>(occupiedDll) / static_cast<float>(kProImportDllHashDimensions);
+        result.Stats[idx++] = static_cast<float>(occupiedApi) / static_cast<float>(kProImportApiHashDimensions);
+        result.Stats[idx++] = totalDlls > 0
+            ? static_cast<float>(duplicateDllCount) / static_cast<float>(totalDlls)
+            : 0.0f;
+        result.Stats[idx++] = importDirectorySize > 0
+            ? static_cast<float>(std::log(static_cast<double>(importDirectorySize) + 1.0))
+            : 0.0f;
+        result.Stats[idx++] = result.DelayDllCount > 0 ? 1.0f : 0.0f;
+        result.Stats[idx++] = totalApis > 0
+            ? static_cast<float>(namedApiCount) / static_cast<float>(totalApis)
+            : 0.0f;
+        result.Stats[idx++] = result.DelayApiCount > 0
+            ? static_cast<float>(delayOrdinalApiCount) / static_cast<float>(result.DelayApiCount)
+            : 0.0f;
+        result.Stats[idx++] = static_cast<float>(std::log(static_cast<double>(totalDlls) + 1.0));
+    }
+
+    // 解析导入表与延迟导入表。没有导入目录、导入表损坏、解析中途越界都会得到明确的 Status，
+    // 不做静默兜底：Status 本身也是特征的一部分，托管端用它做同样的区分。
+    void BuildImportBehaviorFeatures(const std::vector<std::uint8_t>& bytes, ImportBehaviorFeatures& result)
+    {
+        result = {};
+
+        PeImportContext context;
+        if (!TryCreatePeImportContext(bytes, context))
+        {
+            result.Status = ImportParseStatusInvalid;
+            WriteImportStats(result, 0, 0, 0, 0, 0);
+            return;
+        }
+
+        std::unordered_set<std::string> seenDllNames;
+        int duplicateDllCount = 0;
+        int ordinalApiCount = 0;
+        int namedApiCount = 0;
+
+        bool hasImportDirectory = context.ImportDirectoryRva != 0;
+        ImportParseStatus status = hasImportDirectory ? ImportParseStatusOk : ImportParseStatusNoImportTable;
+
+        if (hasImportDirectory)
+        {
+            status = ParseImportDirectory(context, context.ImportDirectoryRva, 20, false, result,
+                                         seenDllNames, duplicateDllCount, ordinalApiCount, namedApiCount);
+        }
+
+        int delayOrdinalApiCount = 0;
+        if (context.DelayImportDirectoryRva != 0)
+        {
+            ImportParseStatus delayStatus = ParseImportDirectory(context, context.DelayImportDirectoryRva, 32, true,
+                                                                result, seenDllNames, duplicateDllCount,
+                                                                delayOrdinalApiCount, namedApiCount);
+
+            if (status == ImportParseStatusOk && delayStatus != ImportParseStatusOk)
+            {
+                status = (delayStatus == ImportParseStatusInvalid && result.DllCount > 0)
+                    ? ImportParseStatusTruncated
+                    : delayStatus;
+            }
+        }
+
+        result.Status = (result.DllCount == 0 && hasImportDirectory && status == ImportParseStatusOk)
+            ? ImportParseStatusNoImportTable
+            : status;
+
+        WriteImportStats(result, duplicateDllCount, ordinalApiCount, delayOrdinalApiCount,
+                         context.ImportDirectorySize, namedApiCount);
+    }
+
+    void AppendProImportBehaviorFeatures(const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
+    {
+        ImportBehaviorFeatures import;
+        BuildImportBehaviorFeatures(bytes, import);
+        features.insert(features.end(), import.DllBuckets.begin(), import.DllBuckets.end());
+        features.insert(features.end(), import.ApiBuckets.begin(), import.ApiBuckets.end());
+        features.insert(features.end(), import.Stats.begin(), import.Stats.end());
+    }
+
     bool ExtractFeaturesForMode(int mode, int featureCount, const std::vector<std::uint8_t>& bytes, std::vector<float>& features)
     {
         if (!IsPeFile(bytes))
@@ -1317,9 +1851,10 @@ AdaptivePro = std::make_unique<NativeSession>(
         case XdowsModelNativeModeFlash:
             AppendFlashFeatures(bytes, features);
             return features.size() == kFlashFeatureCount;
-case XdowsModelNativeModePro:
+        case XdowsModelNativeModePro:
         {
-            if (featureCount != kProHybridFeatureCount && featureCount != 4)
+            // featureCount 是融合模型输入维度（= 分支数）：4 = 旧版四分支，5 = 新版五分支。
+            if (!IsProFusionBranchCount(featureCount))
                 return false;
 
             UnifiedScanResult unified = ComputeUnifiedScan(bytes.data(), bytes.size(), true, true);
@@ -1327,7 +1862,9 @@ case XdowsModelNativeModePro:
             AppendFlashFeaturesFromUnified(bytes, unified, features);
             AppendProRawStatFeatures(bytes, features);
             AppendProStructuralFeatures(bytes, features);
-            return features.size() == static_cast<size_t>(kProHybridFeatureCount);
+            if (featureCount == kProBranchCount)
+                AppendProImportBehaviorFeatures(bytes, features);
+            return features.size() == static_cast<size_t>(ProHybridFeatureCountForBranchCount(featureCount));
         }
         default:
             AppendStandardFeatures(bytes, features);
@@ -1342,7 +1879,9 @@ case XdowsModelNativeModePro:
         case XdowsModelNativeModeFlash:
             return kFlashFeatureCount;
         case XdowsModelNativeModePro:
-            return kProHybridFeatureCount;
+            // Pro 的 FeatureCount 是"融合模型输入维度 = 分支数"，真实值总是从融合模型元数据读取。
+            // 这里的返回值只在模型连 Features 输入都读不出来时兜底，此时构造期会判定为不可用并抛错。
+            return kProLegacyBranchCount;
         case XdowsModelNativeModeAdaptive:
             return 0;
         default:
@@ -1786,39 +2325,44 @@ case XdowsModelNativeModePro:
             return false;
         }
 
-        if (session->Mode != XdowsModelNativeModePro || session->FeatureCount != 4)
+        if (session->Mode != XdowsModelNativeModePro || !IsProFusionBranchCount(session->FeatureCount))
             return RunOnnxSession(session->Session.get(), session->FeatureCount, features, probability, error);
 
-        if (features.size() != static_cast<size_t>(kProHybridFeatureCount))
+        const int branchCount = session->FeatureCount;
+        const int expectedHybridFeatureCount = ProHybridFeatureCountForBranchCount(branchCount);
+        if (features.size() != static_cast<size_t>(expectedHybridFeatureCount))
         {
             error = L"pro-hybrid-feature-count-mismatch";
             return false;
         }
 
-        const std::array<size_t, 4> offsets{
+        // 分支偏移即融合特征向量的顺序：Standard / Flash / RawStat / Structural / ImportBehavior。
+        const std::array<size_t, kProBranchCount> offsets{
             0,
             kStandardFeatureCount,
             kStandardFeatureCount + kFlashFeatureCount,
-            kStandardFeatureCount + kFlashFeatureCount + kProRawStatFeatureCount };
+            kStandardFeatureCount + kFlashFeatureCount + kProRawStatFeatureCount,
+            kProImportBehaviorOffset };
 
-        // T5：与 Managed ProEnsembleSession.Parallel.For 对齐，4 个分支 session 并行推理。
+        // T5：与 Managed ProEnsembleSession.Parallel.For 对齐，各分支 session 并行推理。
         // 每分支独立 Ort::Session（可并发 Run），error 线程局部，避免数据竞争。
-        std::vector<float> fusionFeatures(4, 0.0f);
+        std::vector<float> fusionFeatures(static_cast<size_t>(branchCount), 0.0f);
         std::vector<std::future<bool>> futures;
-        std::vector<std::wstring> branchErrors(session->ProBranchSessions.size());
-        std::vector<float> branchProbabilities(session->ProBranchSessions.size(), 0.0f);
-        futures.reserve(session->ProBranchSessions.size());
+        std::vector<std::wstring> branchErrors(static_cast<size_t>(branchCount));
+        std::vector<float> branchProbabilities(static_cast<size_t>(branchCount), 0.0f);
+        futures.reserve(static_cast<size_t>(branchCount));
 
-        for (size_t i = 0; i < session->ProBranchSessions.size(); i++)
+        for (int i = 0; i < branchCount; i++)
         {
-            int count = session->ProBranchFeatureCounts[i];
-            futures.push_back(std::async(std::launch::async, [&, i, count]() -> bool
+            size_t branchIndex = static_cast<size_t>(i);
+            int count = session->ProBranchFeatureCounts[branchIndex];
+            futures.push_back(std::async(std::launch::async, [&, branchIndex, count]() -> bool
             {
                 std::vector<float> branchFeatures(
-                    features.begin() + static_cast<std::ptrdiff_t>(offsets[i]),
-                    features.begin() + static_cast<std::ptrdiff_t>(offsets[i] + count));
-                return RunOnnxSession(session->ProBranchSessions[i].get(), count, branchFeatures,
-                                      branchProbabilities[i], branchErrors[i]);
+                    features.begin() + static_cast<std::ptrdiff_t>(offsets[branchIndex]),
+                    features.begin() + static_cast<std::ptrdiff_t>(offsets[branchIndex] + static_cast<size_t>(count)));
+                return RunOnnxSession(session->ProBranchSessions[branchIndex].get(), count, branchFeatures,
+                                      branchProbabilities[branchIndex], branchErrors[branchIndex]);
             }));
         }
 
@@ -1832,7 +2376,7 @@ case XdowsModelNativeModePro:
             fusionFeatures[i] = branchProbabilities[i] / 100.0f;
         }
 
-        return RunOnnxSession(session->Session.get(), 4, fusionFeatures, probability, error);
+        return RunOnnxSession(session->Session.get(), branchCount, fusionFeatures, probability, error);
     }
 
 // T4：Adaptive 闪存阶段用分区域读取（只读 head+tail），escalate 才全量读。
@@ -1884,6 +2428,9 @@ case XdowsModelNativeModePro:
         features.insert(features.end(), flashFeatures.begin(), flashFeatures.end());
         AppendProRawStatFeatures(bytes, features);
         AppendProStructuralFeatures(bytes, features);
+        // 新版五分支模型才带 ImportBehavior 段；旧版四分支模型保持 519 维输入不变。
+        if (session->AdaptivePro->FeatureCount == kProBranchCount)
+            AppendProImportBehaviorFeatures(bytes, features);
         if (!RunOnnx(session->AdaptivePro.get(), features, probability, error))
             return false;
         finalMode = XdowsModelNativeModePro;
