@@ -1,0 +1,53 @@
+{
+  "SchemaVersion": 1,
+  "ModelVersion": "2.0.0.0",
+  "FeatureSchemaVersion": 3,
+  "FeatureCount": 5143,
+  "FeatureHash": "2351cfec",
+  "FusionModelFileName": "Xdows-Model-Pro.onnx",
+  "FusionInputCount": 5,
+  "Branches": [
+    {
+      "Name": "Standard",
+      "FileName": "Xdows-Model-Pro-Standard.onnx",
+      "InputDimension": 299,
+      "FeatureOffset": 0,
+      "FeatureCount": 299
+    },
+    {
+      "Name": "Flash",
+      "FileName": "Xdows-Model-Pro-Flash.onnx",
+      "InputDimension": 68,
+      "FeatureOffset": 299,
+      "FeatureCount": 68
+    },
+    {
+      "Name": "RawStat",
+      "FileName": "Xdows-Model-Pro-RawStat.onnx",
+      "InputDimension": 120,
+      "FeatureOffset": 367,
+      "FeatureCount": 120
+    },
+    {
+      "Name": "Structural",
+      "FileName": "Xdows-Model-Pro-Structural.onnx",
+      "InputDimension": 32,
+      "FeatureOffset": 487,
+      "FeatureCount": 32
+    },
+    {
+      "Name": "ImportBehavior",
+      "FileName": "Xdows-Model-Pro-ImportBehavior.onnx",
+      "InputDimension": 4624,
+      "FeatureOffset": 519,
+      "FeatureCount": 4624
+    }
+  ],
+  "HashAlgorithm": "Fnv1a32",
+  "HashSeed": 2166136261,
+  "DllHashDimensions": 512,
+  "ApiHashDimensions": 4096,
+  "Threshold": 94,
+  "RecommendedThreshold": 73.1979751586914,
+  "GeneratedAt": "2026-09-26 10:33:54"
+}

@@ -1,6 +1,5 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using System.Reflection;
 using Xdows_Model_Config;
 
 namespace Xdows_Model_Invoker
@@ -42,36 +41,24 @@ namespace Xdows_Model_Invoker
         /// </summary>
         public static bool AutoThresholdSelection { get; set; } = true;
 
+        /// <summary>
+        /// 解析模型文件的完整路径。模型统一放在程序集目录下的 Models 子目录（见 <see cref="ModelLayout"/>），
+        /// 找不到时回退到程序集目录本身以兼容升级前的部署布局；两处都没有则抛出带两个候选路径的明确异常。
+        /// </summary>
         private static string EnsureModelAvailable(string fileName)
         {
-            string baseDir = AppContext.BaseDirectory;
-            string destPath = Path.Combine(baseDir, fileName);
+            string modelDirectory = ModelLayout.ResolveModelDirectory(AppContext.BaseDirectory);
+            string modelPath = Path.Combine(modelDirectory, fileName);
+            if (File.Exists(modelPath))
+                return modelPath;
 
-            if (File.Exists(destPath))
-                return destPath;
+            string legacyPath = Path.Combine(AppContext.BaseDirectory, fileName);
+            if (File.Exists(legacyPath))
+                return legacyPath;
 
-            var asm = Assembly.GetExecutingAssembly();
-
-            var resourceName = asm.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith(fileName, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrEmpty(resourceName))
-            {
-                using var rs = asm.GetManifestResourceStream(resourceName);
-                if (rs != null)
-                {
-                    using var fs = new FileStream(destPath, FileMode.Create, FileAccess.Write);
-                    rs.CopyTo(fs);
-                    return destPath;
-                }
-            }
-            var asmDir = Path.GetDirectoryName(asm.Location) ?? baseDir;
-            var candidate = Path.Combine(asmDir, fileName);
-            if (File.Exists(candidate))
-            {
-                File.Copy(candidate, destPath, overwrite: true);
-                return destPath;
-            }
-
-            throw new FileNotFoundException($"Model file not found. Expected to find '{fileName}' as an embedded resource or next to the Invoker assembly.", fileName);
+            throw new FileNotFoundException(
+                $"未找到模型文件 '{fileName}'。期望位置：'{modelPath}'（兼容位置：'{legacyPath}'）。",
+                fileName);
         }
 
         public static (ScanVerdict verdict, float probability) PredictWithMlNet(string modelPath, float[] features)

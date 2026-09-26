@@ -77,6 +77,7 @@ AssertThresholdManifestRejection();
 AssertThreeTierVerdict();
 AssertProParallelScoringEquivalence();
 AssertTrainingThreadResolution();
+AssertModelDirectoryLayout();
 ProImportBehaviorArchitectureTests.Run(peSamplePath);
 Console.WriteLine("PASS: Standard training policy preserves class balance and optimizes recall under an FPR cap.");
 Console.WriteLine("PASS: Pro training reuses prepared features and branch copies preserve feature values.");
@@ -175,6 +176,59 @@ static void AssertThreeTierVerdict()
     }
 
     Console.WriteLine("PASS: Three-tier verdict maps probability against fixed and recommended thresholds.");
+}
+
+static void AssertModelDirectoryLayout()
+{
+    if (ModelLayout.ModelDirectoryName != "Models")
+        throw new InvalidOperationException($"模型子目录名应为 Models，实际 {ModelLayout.ModelDirectoryName}。");
+
+    string resolved = ModelLayout.ResolveModelDirectory(@"C:\app");
+    if (resolved != Path.Combine(@"C:\app", "Models"))
+        throw new InvalidOperationException($"模型目录解析结果错误：{resolved}。");
+
+    // 训练端复制产物的目标目录，必须与推理端读取模型的目录是同一个。
+    string? invokerModelDirectory = TrainingOutputCopier.FindInvokerModelDirectory(AppContext.BaseDirectory);
+    if (invokerModelDirectory is null)
+        throw new InvalidOperationException("从测试输出目录向上没有找到 Xdows-Model-Invoker 源目录。");
+    if (Path.GetFileName(invokerModelDirectory) != ModelLayout.ModelDirectoryName ||
+        Path.GetFileName(Path.GetDirectoryName(invokerModelDirectory)) != "Xdows-Model-Invoker")
+    {
+        throw new InvalidOperationException($"训练端复制目标目录不是 Xdows-Model-Invoker\\Models：{invokerModelDirectory}。");
+    }
+
+    // 源目录里的模型清单必须完整，缺一个都会让推理端加载失败。
+    string[] requiredModels =
+    [
+        "Xdows-Model.onnx",
+        "Xdows-Model-Flash.onnx",
+        "Xdows-Model-Pro.onnx",
+        "Xdows-Model-Pro-Standard.onnx",
+        "Xdows-Model-Pro-Flash.onnx",
+        "Xdows-Model-Pro-RawStat.onnx",
+        "Xdows-Model-Pro-Structural.onnx",
+        "Xdows-Model-Pro-ImportBehavior.onnx",
+        "Xdows-Model-Pro.manifest.json"
+    ];
+    foreach (string required in requiredModels)
+    {
+        string path = Path.Combine(invokerModelDirectory, required);
+        if (!File.Exists(path))
+            throw new InvalidOperationException($"Invoker 源模型目录缺少 {required}：{path}。");
+    }
+
+    // 构建输出必须保留 Models 子目录，否则 ModelInvoker.EnsureModelAvailable 找不到模型。
+    string outputModelDirectory = ModelLayout.ResolveModelDirectory(AppContext.BaseDirectory);
+    if (!Directory.Exists(outputModelDirectory))
+        throw new InvalidOperationException($"测试输出目录里没有 Models 子目录：{outputModelDirectory}。");
+    foreach (string required in requiredModels)
+    {
+        string path = Path.Combine(outputModelDirectory, required);
+        if (!File.Exists(path))
+            throw new InvalidOperationException($"构建输出没有把 {required} 复制到 {outputModelDirectory}。");
+    }
+
+    Console.WriteLine($"PASS: 模型统一放在 {ModelLayout.ModelDirectoryName} 子目录，源目录与构建输出都已就位。");
 }
 
 static void AssertStandardThresholdSelection()

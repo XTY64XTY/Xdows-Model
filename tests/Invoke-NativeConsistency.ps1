@@ -53,7 +53,7 @@ if (!$SkipBuild) {
 
 $nativeDir = Join-Path $repoRoot (Join-Path $Platform $Configuration)
 $nativeDll = Join-Path $nativeDir "Xdows-Model-Native.dll"
-$modelDir = Join-Path $repoRoot "Xdows-Model-Invoker"
+$modelDir = Join-Path $repoRoot "Xdows-Model-Invoker\Models"
 
 $nativeAvailable = !$SkipNative -and (Test-Path $nativeDll)
 if ($nativeAvailable) {
@@ -64,7 +64,19 @@ if ($nativeAvailable) {
     }
 }
 
-foreach ($required in @("Xdows-Model.onnx", "Xdows-Model-Flash.onnx", "Xdows-Model-Pro.onnx")) {
+$requiredModels = @(
+    "Xdows-Model.onnx",
+    "Xdows-Model-Flash.onnx",
+    "Xdows-Model-Pro.onnx",
+    "Xdows-Model-Pro-Standard.onnx",
+    "Xdows-Model-Pro-Flash.onnx",
+    "Xdows-Model-Pro-RawStat.onnx",
+    "Xdows-Model-Pro-Structural.onnx",
+    "Xdows-Model-Pro-ImportBehavior.onnx",
+    "Xdows-Model-Pro.manifest.json"
+)
+
+foreach ($required in $requiredModels) {
     $path = Join-Path $modelDir $required
     if (!(Test-Path $path)) {
         throw "Model file was not found: $path"

@@ -23,36 +23,19 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Xdows-Model.onnx" Condition="Exists('Xdows-Model.onnx')" />
-    <Content Include="Xdows-Model.onnx" Condition="Exists('Xdows-Model.onnx')">
+    <!--
+      模型与阈值清单统一放在 Models 子目录，输出目录保持同样的相对路径（bin\<cfg>\<tfm>\Models\）。
+      这里只做 Content 复制，不再用 EmbeddedResource 内嵌：内嵌会让 dll 多出 20+ MB，
+      而模型本来就要随输出目录一起分发。加载端见 ModelInvoker.EnsureModelAvailable。
+    -->
+    <Content Include="Models\*.onnx">
+      <Link>Models\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <EmbeddedResource Include="Xdows-Model-Flash.onnx" Condition="Exists('Xdows-Model-Flash.onnx')" />
-    <Content Include="Xdows-Model-Flash.onnx" Condition="Exists('Xdows-Model-Flash.onnx')">
+    <Content Include="Models\*.json">
+      <Link>Models\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <EmbeddedResource Include="Xdows-Model-Pro.onnx" Condition="Exists('Xdows-Model-Pro.onnx')" />
-    <Content Include="Xdows-Model-Pro.onnx" Condition="Exists('Xdows-Model-Pro.onnx')">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <EmbeddedResource Include="Xdows-Model-Pro-Standard.onnx" Condition="Exists('Xdows-Model-Pro-Standard.onnx')" />
-    <Content Include="Xdows-Model-Pro-Standard.onnx" Condition="Exists('Xdows-Model-Pro-Standard.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-    <EmbeddedResource Include="Xdows-Model-Pro-Flash.onnx" Condition="Exists('Xdows-Model-Pro-Flash.onnx')" />
-    <Content Include="Xdows-Model-Pro-Flash.onnx" Condition="Exists('Xdows-Model-Pro-Flash.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-    <EmbeddedResource Include="Xdows-Model-Pro-RawStat.onnx" Condition="Exists('Xdows-Model-Pro-RawStat.onnx')" />
-    <Content Include="Xdows-Model-Pro-RawStat.onnx" Condition="Exists('Xdows-Model-Pro-RawStat.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-<EmbeddedResource Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')" />
-    <Content Include="Xdows-Model-Pro-Structural.onnx" Condition="Exists('Xdows-Model-Pro-Structural.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-    <EmbeddedResource Include="Xdows-Model-Pro-ImportBehavior.onnx" Condition="Exists('Xdows-Model-Pro-ImportBehavior.onnx')" />
-    <Content Include="Xdows-Model-Pro-ImportBehavior.onnx" Condition="Exists('Xdows-Model-Pro-ImportBehavior.onnx')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-    <EmbeddedResource Include="Xdows-Model-Pro.manifest.json" Condition="Exists('Xdows-Model-Pro.manifest.json')" />
-    <Content Include="Xdows-Model-Pro.manifest.json" Condition="Exists('Xdows-Model-Pro.manifest.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-    <EmbeddedResource Include="Xdows-Model.threshold.json" Condition="Exists('Xdows-Model.threshold.json')" />
-    <Content Include="Xdows-Model.threshold.json" Condition="Exists('Xdows-Model.threshold.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-    <EmbeddedResource Include="Xdows-Model-Flash.threshold.json" Condition="Exists('Xdows-Model-Flash.threshold.json')" />
-    <Content Include="Xdows-Model-Flash.threshold.json" Condition="Exists('Xdows-Model-Flash.threshold.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
-    <EmbeddedResource Include="Xdows-Model-Pro.threshold.json" Condition="Exists('Xdows-Model-Pro.threshold.json')" />
-    <Content Include="Xdows-Model-Pro.threshold.json" Condition="Exists('Xdows-Model-Pro.threshold.json')"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
   </ItemGroup>
 
 </Project>
