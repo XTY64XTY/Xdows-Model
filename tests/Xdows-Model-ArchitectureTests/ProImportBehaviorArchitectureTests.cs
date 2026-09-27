@@ -253,28 +253,85 @@ internal static class ProImportBehaviorArchitectureTests
         if (string.IsNullOrEmpty(hash) || hash != ProBranches.ComputeFeatureLayoutHash())
             throw new InvalidOperationException("特征布局指纹不稳定。");
 
-        AssertInvokerArtifactCopyList();
+        AssertModelLayoutContract();
 
         Console.WriteLine($"PASS: Pro 分支布局为五路（布局指纹 {hash}）。");
     }
 
-    /// <summary>复制到调用器的产物清单必须覆盖全部五分支与模型清单，否则新模型会在推理端加载失败。</summary>
-    private static void AssertInvokerArtifactCopyList()
+    /// <summary>
+    /// 模型部署清单只有一个来源：<see cref="ModelLayout.RequiredFileNames"/>。
+    /// 训练端复制、宿主自检、原生 staging 都从它取；任何一处漏文件都会让新版模型在推理端加载失败。
+    /// 同时锁住"先 Models\ 再扁平"的查找顺序。
+    /// </summary>
+    private static void AssertModelLayoutContract()
     {
-        string[] copied = TrainingOutputCopier.EnumerateOnnxFileNames().ToArray();
-
+        // 必需清单必须覆盖融合模型、每个分支与 Pro 模型清单。
+        string[] required =
+        [
+            ModelLayout.StandardFileName,
+            ModelLayout.FlashFileName,
+            ModelLayout.ProFusionFileName,
+            ProModelManifest.FileNameFor(ModelLayout.ProFusionFileName)
+        ];
         foreach (ProBranch branch in ProBranches.All)
         {
-            string expected = ProBranches.FileNameFor(branch, "Xdows-Model-Pro.onnx");
-            if (!copied.Contains(expected, StringComparer.Ordinal))
-                throw new InvalidOperationException($"复制产物清单缺少 {expected}。");
+            string branchFileName = ProBranches.FileNameFor(branch, ModelLayout.ProFusionFileName);
+            if (!ModelLayout.RequiredFileNames.Contains(branchFileName, StringComparer.Ordinal))
+                throw new InvalidOperationException($"必需模型清单缺少 {branch} 分支：{branchFileName}。");
+        }
+        foreach (string name in required)
+        {
+            if (!ModelLayout.RequiredFileNames.Contains(name, StringComparer.Ordinal))
+                throw new InvalidOperationException($"必需模型清单缺少 {name}。");
+        }
+        if (ModelLayout.RequiredFileNames.Distinct(StringComparer.Ordinal).Count() != ModelLayout.RequiredFileNames.Count)
+            throw new InvalidOperationException("必需模型清单包含重复项。");
+
+        // 训练端复制清单必须与推理端必需清单完全一致。
+        string[] copied = TrainingOutputCopier.EnumerateOnnxFileNames().ToArray();
+        if (!copied.OrderBy(name => name, StringComparer.Ordinal)
+                .SequenceEqual(ModelLayout.RequiredFileNames.OrderBy(name => name, StringComparer.Ordinal), StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"训练端复制清单与推理端必需清单不一致：复制 {copied.Length} 个，必需 {ModelLayout.RequiredFileNames.Count} 个。");
         }
 
-        string manifestName = ProModelManifest.FileNameFor("Xdows-Model-Pro.onnx");
-        if (!copied.Contains(manifestName, StringComparer.Ordinal))
-            throw new InvalidOperationException($"复制产物清单缺少 {manifestName}。");
-        if (!copied.Contains("Xdows-Model-Pro.onnx", StringComparer.Ordinal))
-            throw new InvalidOperationException("复制产物清单缺少 Pro 融合模型。");
+        if (ModelLayout.RelativePath(ModelLayout.ProFusionFileName) !=
+            Path.Combine(ModelLayout.ModelDirectoryName, ModelLayout.ProFusionFileName))
+        {
+            throw new InvalidOperationException("模型相对路径推导错误。");
+        }
+
+        AssertModelPathResolutionOrder();
+    }
+
+    /// <summary>查找顺序必须是「Models 子目录优先，旧的扁平位置兜底，都没有返回 null」。</summary>
+    private static void AssertModelPathResolutionOrder()
+    {
+        string directory = CreateTempDirectory("xdows-model-path");
+        try
+        {
+            string fileName = ModelLayout.ProFusionFileName;
+
+            if (ModelLayout.ResolveExistingModelPath(directory, fileName) is not null)
+                throw new InvalidOperationException("模型不存在时 ResolveExistingModelPath 必须返回 null。");
+
+            string flatPath = Path.Combine(directory, fileName);
+            File.WriteAllText(flatPath, "flat");
+            if (ModelLayout.ResolveExistingModelPath(directory, fileName) != flatPath)
+                throw new InvalidOperationException("旧部署的扁平位置没有被兼容命中。");
+
+            string modelsDirectory = ModelLayout.ResolveModelDirectory(directory);
+            Directory.CreateDirectory(modelsDirectory);
+            string preferredPath = Path.Combine(modelsDirectory, fileName);
+            File.WriteAllText(preferredPath, "models");
+            if (ModelLayout.ResolveExistingModelPath(directory, fileName) != preferredPath)
+                throw new InvalidOperationException("Models 子目录没有被优先命中。");
+        }
+        finally
+        {
+            DeleteTempDirectory(directory);
+        }
     }
 
     private static void AssertProManifestRoundTrip()

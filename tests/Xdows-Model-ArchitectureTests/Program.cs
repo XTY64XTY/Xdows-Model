@@ -198,19 +198,7 @@ static void AssertModelDirectoryLayout()
     }
 
     // 源目录里的模型清单必须完整，缺一个都会让推理端加载失败。
-    string[] requiredModels =
-    [
-        "Xdows-Model.onnx",
-        "Xdows-Model-Flash.onnx",
-        "Xdows-Model-Pro.onnx",
-        "Xdows-Model-Pro-Standard.onnx",
-        "Xdows-Model-Pro-Flash.onnx",
-        "Xdows-Model-Pro-RawStat.onnx",
-        "Xdows-Model-Pro-Structural.onnx",
-        "Xdows-Model-Pro-ImportBehavior.onnx",
-        "Xdows-Model-Pro.manifest.json"
-    ];
-    foreach (string required in requiredModels)
+    foreach (string required in ModelLayout.RequiredFileNames)
     {
         string path = Path.Combine(invokerModelDirectory, required);
         if (!File.Exists(path))
@@ -221,7 +209,7 @@ static void AssertModelDirectoryLayout()
     string outputModelDirectory = ModelLayout.ResolveModelDirectory(AppContext.BaseDirectory);
     if (!Directory.Exists(outputModelDirectory))
         throw new InvalidOperationException($"测试输出目录里没有 Models 子目录：{outputModelDirectory}。");
-    foreach (string required in requiredModels)
+    foreach (string required in ModelLayout.RequiredFileNames)
     {
         string path = Path.Combine(outputModelDirectory, required);
         if (!File.Exists(path))

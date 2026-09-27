@@ -2123,6 +2123,10 @@ Options.SetIntraOpNumThreads(1);
         return std::filesystem::current_path();
     }
 
+    // 模型子目录名，必须与 Managed 的 ModelLayout.ModelDirectoryName 保持一致。
+    // 改这里就要同步改 ModelLayout.cs，两边的查找顺序是同一套约定。
+    constexpr const wchar_t* kModelDirectoryName = L"Models";
+
     std::filesystem::path ResolveModelPath(const wchar_t* modelDirectory, int mode)
     {
         const wchar_t* modelName = ModelNameForMode(mode);
@@ -2134,11 +2138,23 @@ Options.SetIntraOpNumThreads(1);
                 return explicitPath;
         }
 
-        std::filesystem::path modulePath = GetModuleDirectory() / modelName;
+        // 与 Managed ModelInvoker.EnsureModelAvailable 同一套查找顺序：
+        // 先 <目录>\Models\，再退回 <目录> 本身（旧部署模型是直接摊在目录里的）。
+        std::filesystem::path moduleDirectory = GetModuleDirectory();
+        std::filesystem::path moduleModelPath = moduleDirectory / kModelDirectoryName / modelName;
+        if (std::filesystem::exists(moduleModelPath))
+            return moduleModelPath;
+
+        std::filesystem::path modulePath = moduleDirectory / modelName;
         if (std::filesystem::exists(modulePath))
             return modulePath;
 
-        std::filesystem::path cwdPath = std::filesystem::current_path() / modelName;
+        std::filesystem::path currentDirectory = std::filesystem::current_path();
+        std::filesystem::path currentModelPath = currentDirectory / kModelDirectoryName / modelName;
+        if (std::filesystem::exists(currentModelPath))
+            return currentModelPath;
+
+        std::filesystem::path cwdPath = currentDirectory / modelName;
         if (std::filesystem::exists(cwdPath))
             return cwdPath;
 

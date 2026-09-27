@@ -8,37 +8,33 @@ namespace Xdows_Model_Maker;
 /// </summary>
 internal static class TrainingOutputCopier
 {
-    /// <summary>单个模型的 ONNX 产物名（不含 Pro 分支）。</summary>
-    private static readonly string[] SingleOnnxFileNames =
-    [
-        "Xdows-Model.onnx",
-        "Xdows-Model-Flash.onnx"
-    ];
-
-    /// <summary>Pro 融合模型文件名；分支模型名与清单名都由它推导。</summary>
-    private const string ProFusionFileName = "Xdows-Model-Pro.onnx";
-
-    private static readonly string[] ThresholdManifestNames =
-    [
-        "Xdows-Model.threshold.json",
-        "Xdows-Model-Flash.threshold.json",
-        "Xdows-Model-Pro.threshold.json"
-    ];
+    /// <summary>
+    /// 阈值清单不是硬性依赖（缺失时推理端回退到固定阈值），但要跟着模型一起带走，
+    /// 否则三档判定会退化成二档。文件名由模型名加 <see cref="ModelThresholdManifest.FileSuffix"/> 推导。
+    /// </summary>
+    private static readonly string[] ThresholdManifestNames = BuildThresholdManifestNames();
 
     /// <summary>
-    /// 需要复制的 ONNX 产物名。Pro 分支与模型清单从 <see cref="ProBranches"/> /
-    /// <see cref="ProModelManifest"/> 推导，新增分支时不会漏复制而让推理端加载失败。
-    /// 公开给架构测试，用来锁住"复制清单必须覆盖全部分支 + 清单"这条约定。
+    /// 需要复制的 ONNX 产物名。清单本身由 <see cref="ModelLayout.RequiredFileNames"/> 唯一决定
+    /// （Pro 分支与模型清单都从 <see cref="ProBranches"/> / <see cref="ProModelManifest"/> 推导），
+    /// 新增分支时训练端不会漏复制、推理端不会加载失败。
+    /// 公开给架构测试，用来锁住"训练端复制清单 == 推理端必需清单"这条约定。
     /// </summary>
-    internal static IEnumerable<string> EnumerateOnnxFileNames()
-    {
-        foreach (string fileName in SingleOnnxFileNames)
-            yield return fileName;
+    internal static IEnumerable<string> EnumerateOnnxFileNames() => ModelLayout.RequiredFileNames;
 
-        yield return ProFusionFileName;
-        foreach (ProBranch branch in ProBranches.All)
-            yield return ProBranches.FileNameFor(branch, ProFusionFileName);
-        yield return ProModelManifest.FileNameFor(ProFusionFileName);
+    private static string[] BuildThresholdManifestNames()
+    {
+        string[] modelFileNames =
+        [
+            ModelLayout.StandardFileName,
+            ModelLayout.FlashFileName,
+            ModelLayout.ProFusionFileName
+        ];
+
+        return modelFileNames
+            .Select(Path.GetFileNameWithoutExtension)
+            .Select(name => name + ModelThresholdManifest.FileSuffix)
+            .ToArray();
     }
 
     /// <summary>

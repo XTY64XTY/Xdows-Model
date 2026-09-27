@@ -42,22 +42,20 @@ namespace Xdows_Model_Invoker
         public static bool AutoThresholdSelection { get; set; } = true;
 
         /// <summary>
-        /// 解析模型文件的完整路径。模型统一放在程序集目录下的 Models 子目录（见 <see cref="ModelLayout"/>），
-        /// 找不到时回退到程序集目录本身以兼容升级前的部署布局；两处都没有则抛出带两个候选路径的明确异常。
+        /// 解析模型文件的完整路径。查找顺序由 <see cref="ModelLayout.ResolveExistingModelPath"/> 统一决定：
+        /// 程序集目录下的 Models 子目录优先，再回退程序集目录本身（兼容升级前的部署）。
+        /// 两处都没有时抛出带两个候选路径的明确异常。
         /// </summary>
         private static string EnsureModelAvailable(string fileName)
         {
+            string? resolved = ModelLayout.ResolveExistingModelPath(AppContext.BaseDirectory, fileName);
+            if (resolved is not null)
+                return resolved;
+
             string modelDirectory = ModelLayout.ResolveModelDirectory(AppContext.BaseDirectory);
-            string modelPath = Path.Combine(modelDirectory, fileName);
-            if (File.Exists(modelPath))
-                return modelPath;
-
-            string legacyPath = Path.Combine(AppContext.BaseDirectory, fileName);
-            if (File.Exists(legacyPath))
-                return legacyPath;
-
             throw new FileNotFoundException(
-                $"未找到模型文件 '{fileName}'。期望位置：'{modelPath}'（兼容位置：'{legacyPath}'）。",
+                $"未找到模型文件 '{fileName}'。期望位置：'{Path.Combine(modelDirectory, fileName)}'" +
+                $"（兼容位置：'{Path.Combine(AppContext.BaseDirectory, fileName)}'）。",
                 fileName);
         }
 
