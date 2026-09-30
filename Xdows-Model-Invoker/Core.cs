@@ -487,7 +487,7 @@ namespace Xdows_Model_Invoker
             return new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
         }
 
-internal static float RunProbability(InferenceSession session, float[] features, int featureCount)
+        internal static float RunProbability(InferenceSession session, float[] features, int featureCount)
         {
             var featuresTensor = new DenseTensor<float>(new Memory<float>(features, 0, featureCount), new[] { 1, featureCount });
             var labelTensor = new DenseTensor<bool>(new Memory<bool>(new bool[] { false }), new[] { 1, 1 });

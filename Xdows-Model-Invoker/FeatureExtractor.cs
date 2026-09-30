@@ -1,7 +1,4 @@
-using System;
-using System.IO;
 using System.Runtime.CompilerServices;
-using System.Threading.Tasks;
 using Xdows_Model_Config;
 
 namespace Xdows_Model_Invoker;
@@ -740,9 +737,9 @@ public class FlashFileFeatures
         features[idx++] = (float)TailBlockEntropyVar;
 
         features[idx++] = PeNumberOfSections;
-        features[idx++] = (float)PeTimeDateStamp;
+        features[idx++] = PeTimeDateStamp;
         features[idx++] = PeCharacteristics;
-        features[idx++] = (float)PeSizeOfHeaders;
+        features[idx++] = PeSizeOfHeaders;
         features[idx++] = PeOptionalMagic;
 
         return features;
@@ -790,9 +787,9 @@ public class FlashFileFeatures
         destination[idx++] = (float)TailBlockEntropyVar;
 
         destination[idx++] = PeNumberOfSections;
-        destination[idx++] = (float)PeTimeDateStamp;
+        destination[idx++] = PeTimeDateStamp;
         destination[idx++] = PeCharacteristics;
-        destination[idx++] = (float)PeSizeOfHeaders;
+        destination[idx++] = PeSizeOfHeaders;
         destination[idx++] = PeOptionalMagic;
     }
 }
@@ -1160,9 +1157,9 @@ public class FileFeatures
         features[idx++] = MaxNonZeroByteRun;
         features[idx++] = (float)MeanNonZeroRunLength;
         features[idx++] = PeNumberOfSections;
-        features[idx++] = (float)PeTimeDateStamp;
+        features[idx++] = PeTimeDateStamp;
         features[idx++] = PeCharacteristics;
-        features[idx++] = (float)PeSizeOfHeaders;
+        features[idx++] = PeSizeOfHeaders;
         features[idx++] = PeOptionalMagic;
         features[idx++] = (float)HeadBlockEntropyMin;
         features[idx++] = (float)HeadBlockEntropyMax;
@@ -1214,9 +1211,9 @@ public class FileFeatures
         destination[idx++] = MaxNonZeroByteRun;
         destination[idx++] = (float)MeanNonZeroRunLength;
         destination[idx++] = PeNumberOfSections;
-        destination[idx++] = (float)PeTimeDateStamp;
+        destination[idx++] = PeTimeDateStamp;
         destination[idx++] = PeCharacteristics;
-        destination[idx++] = (float)PeSizeOfHeaders;
+        destination[idx++] = PeSizeOfHeaders;
         destination[idx++] = PeOptionalMagic;
         destination[idx++] = (float)HeadBlockEntropyMin;
         destination[idx++] = (float)HeadBlockEntropyMax;

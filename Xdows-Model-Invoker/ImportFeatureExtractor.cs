@@ -179,7 +179,7 @@ public static class ImportFeatureExtractor
 
         for (int index = 0; index < MaxImportDescriptors; index++)
         {
-            long offset = (long)descriptorOffset + (long)index * descriptorSize;
+            long offset = descriptorOffset + (long)index * descriptorSize;
             if (offset + descriptorSize > bytes.Length)
             {
                 status = parsedDescriptors == 0 ? ImportParseStatus.Invalid : ImportParseStatus.Truncated;
@@ -278,7 +278,7 @@ public static class ImportFeatureExtractor
 
         for (int index = 0; index < MaxApisPerDll; index++)
         {
-            long offset = (long)thunkOffset + (long)index * thunkSize;
+            long offset = thunkOffset + (long)index * thunkSize;
             if (offset + thunkSize > bytes.Length)
                 break;
 
@@ -297,7 +297,7 @@ public static class ImportFeatureExtractor
             }
             else
             {
-                string? apiName = context.ReadAsciiString((uint)(thunkValue & 0x7FFFFFFF) , MaxNameBytes, skipHint: true);
+                string? apiName = context.ReadAsciiString((uint)(thunkValue & 0x7FFFFFFF), MaxNameBytes, skipHint: true);
                 if (string.IsNullOrEmpty(apiName))
                     continue;
                 apiKey = ImportHashConfig.NormalizeApiName(apiName);
