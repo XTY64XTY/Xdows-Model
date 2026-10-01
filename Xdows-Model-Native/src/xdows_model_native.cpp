@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -24,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace
@@ -45,6 +47,7 @@ namespace
         kProImportDllHashDimensions + kProImportApiHashDimensions + kProImportStatsCount;
     constexpr std::uint32_t kImportHashSeed = 2166136261u;
     constexpr std::uint32_t kImportHashPrime = 16777619u;
+    constexpr const char* kImportHashAlgorithm = "Fnv1a32";
     constexpr int kProMaxImportDescriptors = 4096;
     constexpr int kProMaxApisPerDll = 65535;
     constexpr int kProMaxTotalApis = 1000000;
@@ -107,15 +110,41 @@ struct PeLayout
     };
 
     // 前向声明（定义在本匿名命名空间后方）
-    float ThresholdForMode(int mode);
     bool TryLoadRecommendedThreshold(const std::filesystem::path& modelPath, int mode, float& recommended);
+    bool LoadAndValidateProManifest(const std::filesystem::path& fusionModelPath,
+                                    int fusionInputCount,
+                                    int branchCount,
+                                    const std::array<std::pair<int, int>, kProBranchCount>& branchLayout);
+    int ProManifestBranchIndex(const std::string& name);
+
+    // 阈值表（对齐 Managed 的固定阈值 + 推荐阈值双轨）：
+    //   Fixed   来自 TrainingConfig（判毒下限），默认 Standard 92 / Flash 96 / Pro 94；
+    //   Recommended 来自模型旁 *.threshold.json（Suspicious 区间下限），清单缺失时等于 Fixed。
+    // 每次 Initialize 由进程级配置拷贝一份进会话，互不影响。
+    struct ThresholdTable
+    {
+        float Fixed[3] = { 92.0f, 96.0f, 94.0f };
+        float Recommended[3] = { 92.0f, 96.0f, 94.0f };
+        bool AutoSelection = true;
+    };
+
+    // 进程级阈值配置，仅影响之后新建的会话。默认值与 TrainingConfig 一致。
+    float g_fixedThresholds[3] = { 92.0f, 96.0f, 94.0f };
+    bool g_autoThresholdSelection = true;
+
+    int ClampModeIndex(int mode)
+    {
+        if (mode < 0 || mode > 2)
+            return 0;
+        return mode;
+    }
 
     struct NativeSession
     {
         int Mode = XdowsModelNativeModeStandard;
         int FeatureCount = kStandardFeatureCount;
         std::filesystem::path ModelPath;
-        float RecommendedThreshold = 0.0f;
+        ThresholdTable Thresholds;
         Ort::Env Env;
         Ort::SessionOptions Options;
         std::unique_ptr<Ort::Session> Session;
@@ -158,8 +187,13 @@ Options.SetIntraOpNumThreads(1);
                     XdowsModelNativeModePro,
                     kProLegacyBranchCount,
                     directory / L"Xdows-Model-Pro.onnx");
-                RecommendedThreshold = ThresholdForMode(XdowsModelNativeModeStandard);
-                TryLoadRecommendedThreshold(ModelPath, XdowsModelNativeModeStandard, RecommendedThreshold);
+                Thresholds.Fixed[0] = g_fixedThresholds[0];
+                Thresholds.Fixed[1] = g_fixedThresholds[1];
+                Thresholds.Fixed[2] = g_fixedThresholds[2];
+                Thresholds.Recommended[0] = g_fixedThresholds[0];
+                Thresholds.Recommended[1] = g_fixedThresholds[1];
+                Thresholds.Recommended[2] = g_fixedThresholds[2];
+                Thresholds.AutoSelection = g_autoThresholdSelection;
                 return;
             }
 
@@ -191,11 +225,39 @@ Options.SetIntraOpNumThreads(1);
                     if (actual != ProBranchFeatureCounts[branchIndex])
                         throw std::runtime_error("pro-stacking-branch-dimension-mismatch");
                 }
+
+                // 清单存在时必须通过严格校验；五分支模型缺清单同样视为不可用。
+                // 旧版四分支模型没有清单，走兼容路径不校验。
+                std::array<std::pair<int, int>, kProBranchCount> branchLayout{};
+                for (int i = 0; i < ProBranchCount; i++)
+                {
+                    size_t slot = static_cast<size_t>(i);
+                    branchLayout[slot] = {
+                        ProBranchFeatureCounts[slot],
+                        i == 0 ? 0 : branchLayout[slot - 1].second + branchLayout[slot - 1].first };
+                }
+
+                if (!LoadAndValidateProManifest(ModelPath, FeatureCount, ProBranchCount, branchLayout))
+                    throw std::runtime_error("pro-manifest-invalid");
             }
 
-            // 推荐阈值（Suspicious 区间下限）来自模型旁 *.threshold.json 清单，缺失/无效时回退固定阈值。
-            RecommendedThreshold = ThresholdForMode(Mode);
-            TryLoadRecommendedThreshold(ModelPath, Mode, RecommendedThreshold);
+            // 阈值：固定阈值来自进程级配置，推荐阈值来自模型旁 *.threshold.json 清单，
+            // 缺失/无效时回退固定阈值（此时 Suspicious 区间为空，退化为二档判定）。
+            Thresholds.Fixed[0] = g_fixedThresholds[0];
+            Thresholds.Fixed[1] = g_fixedThresholds[1];
+            Thresholds.Fixed[2] = g_fixedThresholds[2];
+            Thresholds.Recommended[0] = g_fixedThresholds[0];
+            Thresholds.Recommended[1] = g_fixedThresholds[1];
+            Thresholds.Recommended[2] = g_fixedThresholds[2];
+            Thresholds.AutoSelection = g_autoThresholdSelection;
+
+            if (Thresholds.AutoSelection)
+            {
+                int index = ClampModeIndex(Mode);
+                float recommended = 0.0f;
+                if (TryLoadRecommendedThreshold(ModelPath, Mode, recommended))
+                    Thresholds.Recommended[index] = recommended;
+            }
         }
 
         static int ReadFeatureCount(Ort::Session& session, int fallback)
@@ -308,28 +370,6 @@ Options.SetIntraOpNumThreads(1);
             return false;
 
         return bytes[peOffset] == 'P' && bytes[peOffset + 1] == 'E';
-    }
-
-    bool ContainsAscii(const std::vector<std::uint8_t>& bytes, const std::string& needle)
-    {
-        if (needle.empty() || bytes.size() < needle.size())
-            return false;
-
-        return std::search(
-            bytes.begin(),
-            bytes.end(),
-            needle.begin(),
-            needle.end(),
-            [](std::uint8_t a, char b)
-            {
-                char ca = static_cast<char>(a);
-                char cb = b;
-                if (ca >= 'A' && ca <= 'Z')
-                    ca = static_cast<char>(ca - 'A' + 'a');
-                if (cb >= 'A' && cb <= 'Z')
-                    cb = static_cast<char>(cb - 'A' + 'a');
-                return ca == cb;
-            }) != bytes.end();
     }
 
     bool ReadAllBytes(const std::filesystem::path& path, std::vector<std::uint8_t>& bytes)
@@ -1889,19 +1929,6 @@ Options.SetIntraOpNumThreads(1);
         }
     }
 
-    float ThresholdForMode(int mode)
-    {
-        switch (mode)
-        {
-        case XdowsModelNativeModeFlash:
-            return 96.0f;
-        case XdowsModelNativeModePro:
-            return 94.0f;
-        default:
-            return 92.0f;
-        }
-    }
-
     void SkipJsonWhitespace(const std::string& json, size_t& position)
     {
         while (position < json.size() &&
@@ -2015,6 +2042,400 @@ Options.SetIntraOpNumThreads(1);
                 return false;
         }
         return i == left.size() && right[i] == '\0';
+    }
+
+    bool AsciiEqualsIgnoreCaseW(const std::wstring& left, const std::wstring& right)
+    {
+        if (left.size() != right.size())
+            return false;
+
+        for (size_t i = 0; i < left.size(); i++)
+        {
+            wchar_t a = left[i];
+            wchar_t b = right[i];
+            if (a >= L'A' && a <= L'Z')
+                a = static_cast<wchar_t>(a - L'A' + L'a');
+            if (b >= L'A' && b <= L'Z')
+                b = static_cast<wchar_t>(b - L'A' + L'a');
+            if (a != b)
+                return false;
+        }
+        return true;
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Pro 模型清单（Schema v1）严格校验，逐项对齐 Managed `ProModelManifest.Validate`。
+    // 任何不符都返回 false，由调用方转成 pro-manifest-invalid 使 Initialize 失败，不做静默降级；
+    // 旧版四分支模型（fusionInputCount == 4）没有清单，走兼容路径直接视为通过。
+    // ---------------------------------------------------------------------------------
+    constexpr int kProManifestSchemaVersion = 1;
+    constexpr int kProFeatureSchemaVersion = 3;
+
+    struct ProManifestFields
+    {
+        int SchemaVersion = -1;
+        int FeatureSchemaVersion = -1;
+        int FeatureCount = -1;
+        std::string FeatureHash;
+        std::string FusionModelFileName;
+        int FusionInputCount = -1;
+        std::string HashAlgorithm;
+        double HashSeed = -1;
+        int DllHashDimensions = -1;
+        int ApiHashDimensions = -1;
+        double Threshold = -1;
+        double RecommendedThreshold = -1;
+        bool HasBranches = false;
+        std::vector<std::string> BranchNames;
+        std::vector<std::string> BranchFileNames;
+        std::vector<int> BranchInputDimensions;
+        std::vector<int> BranchFeatureOffsets;
+        std::vector<int> BranchFeatureCounts;
+    };
+
+    bool ReadJsonInt(const std::string& json, size_t& position, int& value)
+    {
+        double number = 0.0;
+        if (!JsonNumber(json, position, number))
+            return false;
+        value = static_cast<int>(number);
+        return true;
+    }
+
+    bool ReadJsonDouble(const std::string& json, size_t& position, double& value)
+    {
+        return JsonNumber(json, position, value);
+    }
+
+    // 跳过一个 JSON 值（字符串/对象/数组/字面量），返回结束位置。
+    bool SkipJsonValue(const std::string& json, size_t& position)
+    {
+        SkipJsonWhitespace(json, position);
+        if (position >= json.size())
+            return false;
+
+        char first = json[position];
+        if (first == '"')
+        {
+            std::string ignored;
+            return ReadJsonString(json, position, ignored);
+        }
+
+        if (first == '{' || first == '[')
+        {
+            char open = first;
+            char close = first == '{' ? '}' : ']';
+            int depth = 0;
+            while (position < json.size())
+            {
+                char current = json[position];
+                if (current == '"')
+                {
+                    std::string ignored;
+                    if (!ReadJsonString(json, position, ignored))
+                        return false;
+                    continue;
+                }
+                if (current == open)
+                    depth++;
+                else if (current == close)
+                {
+                    position++;
+                    if (--depth == 0)
+                        return true;
+                    continue;
+                }
+                position++;
+            }
+            return false;
+        }
+
+        while (position < json.size())
+        {
+            char current = json[position];
+            if (current == ',' || current == '}' || current == ']' ||
+                current == ' ' || current == '\t' || current == '\r' || current == '\n')
+                break;
+            position++;
+        }
+        return true;
+    }
+
+    // 顺序解析一个 JSON 对象：handler(key, valueStart) 返回 true 表示已消费该值，
+    // 返回 false 则由本函数跳过。顺序解析是刻意的——顶层与分支都含 "FeatureCount"，
+    // 全局查找键名会串位。
+    template <typename Handler>
+    bool ParseJsonObject(const std::string& json, size_t& position, Handler&& handler)
+    {
+        SkipJsonWhitespace(json, position);
+        if (position >= json.size() || json[position] != '{')
+            return false;
+        position++;
+
+        while (true)
+        {
+            SkipJsonWhitespace(json, position);
+            if (position >= json.size())
+                return false;
+            if (json[position] == '}')
+            {
+                position++;
+                return true;
+            }
+            if (json[position] == ',')
+            {
+                position++;
+                continue;
+            }
+
+            std::string key;
+            if (!ReadJsonString(json, position, key))
+                return false;
+            SkipJsonWhitespace(json, position);
+            if (position >= json.size() || json[position] != ':')
+                return false;
+            position++;
+            SkipJsonWhitespace(json, position);
+
+            if (!handler(key, position) && !SkipJsonValue(json, position))
+                return false;
+        }
+    }
+
+    bool ParseProManifestBranches(const std::string& json, size_t& position, ProManifestFields& fields)
+    {
+        SkipJsonWhitespace(json, position);
+        if (position >= json.size() || json[position] != '[')
+            return false;
+        position++;
+
+        while (true)
+        {
+            SkipJsonWhitespace(json, position);
+            if (position >= json.size())
+                return false;
+            if (json[position] == ']')
+            {
+                position++;
+                fields.HasBranches = true;
+                return true;
+            }
+            if (json[position] == ',')
+            {
+                position++;
+                continue;
+            }
+            if (json[position] != '{')
+                return false;
+
+            std::string name;
+            std::string fileName;
+            int inputDimension = -1;
+            int featureOffset = -1;
+            int featureCount = -1;
+
+            bool parsed = ParseJsonObject(json, position,
+                [&](const std::string& key, size_t& valueStart) -> bool
+                {
+                    if (key == "Name")
+                        return ReadJsonString(json, valueStart, name);
+                    if (key == "FileName")
+                        return ReadJsonString(json, valueStart, fileName);
+                    if (key == "InputDimension")
+                        return ReadJsonInt(json, valueStart, inputDimension);
+                    if (key == "FeatureOffset")
+                        return ReadJsonInt(json, valueStart, featureOffset);
+                    if (key == "FeatureCount")
+                        return ReadJsonInt(json, valueStart, featureCount);
+                    return false;
+                });
+            if (!parsed)
+                return false;
+
+            fields.BranchNames.push_back(name);
+            fields.BranchFileNames.push_back(fileName);
+            fields.BranchInputDimensions.push_back(inputDimension);
+            fields.BranchFeatureOffsets.push_back(featureOffset);
+            fields.BranchFeatureCounts.push_back(featureCount);
+        }
+    }
+
+    bool ParseProManifest(const std::string& json, ProManifestFields& fields)
+    {
+        size_t position = 0;
+        return ParseJsonObject(json, position,
+            [&](const std::string& key, size_t& valueStart) -> bool
+            {
+                if (key == "SchemaVersion")
+                    return ReadJsonInt(json, valueStart, fields.SchemaVersion);
+                if (key == "FeatureSchemaVersion")
+                    return ReadJsonInt(json, valueStart, fields.FeatureSchemaVersion);
+                if (key == "FeatureCount")
+                    return ReadJsonInt(json, valueStart, fields.FeatureCount);
+                if (key == "FeatureHash")
+                    return ReadJsonString(json, valueStart, fields.FeatureHash);
+                if (key == "FusionModelFileName")
+                    return ReadJsonString(json, valueStart, fields.FusionModelFileName);
+                if (key == "FusionInputCount")
+                    return ReadJsonInt(json, valueStart, fields.FusionInputCount);
+                if (key == "HashAlgorithm")
+                    return ReadJsonString(json, valueStart, fields.HashAlgorithm);
+                if (key == "HashSeed")
+                    return ReadJsonDouble(json, valueStart, fields.HashSeed);
+                if (key == "DllHashDimensions")
+                    return ReadJsonInt(json, valueStart, fields.DllHashDimensions);
+                if (key == "ApiHashDimensions")
+                    return ReadJsonInt(json, valueStart, fields.ApiHashDimensions);
+                if (key == "Threshold")
+                    return ReadJsonDouble(json, valueStart, fields.Threshold);
+                if (key == "RecommendedThreshold")
+                    return ReadJsonDouble(json, valueStart, fields.RecommendedThreshold);
+                if (key == "Branches")
+                    return ParseProManifestBranches(json, valueStart, fields);
+                return false;
+            });
+    }
+
+    // 特征布局指纹，逐字符对齐 Managed ProBranches.ComputeFeatureLayoutHash（FNV-1a + %08x）。
+    std::string ComputeProFeatureLayoutHash()
+    {
+        static constexpr std::array<const char*, kProBranchCount> names{
+            "Standard", "Flash", "RawStat", "Structural", "ImportBehavior" };
+        static constexpr std::array<int, kProBranchCount> counts{
+            kStandardFeatureCount,
+            kFlashFeatureCount,
+            kProRawStatFeatureCount,
+            kProStructuralFeatureCount,
+            kProImportBehaviorFeatureCount };
+
+        std::string layout = "schema=" + std::to_string(kProFeatureSchemaVersion);
+        int offset = 0;
+        for (int i = 0; i < kProBranchCount; i++)
+        {
+            layout += "|";
+            layout += names[static_cast<size_t>(i)];
+            layout += ":";
+            layout += std::to_string(offset);
+            layout += ":";
+            layout += std::to_string(counts[static_cast<size_t>(i)]);
+            offset += counts[static_cast<size_t>(i)];
+        }
+        layout += "|hash=";
+        layout += kImportHashAlgorithm;
+        layout += ":";
+        layout += std::to_string(kImportHashSeed);
+        layout += ":";
+        layout += std::to_string(kProImportDllHashDimensions);
+        layout += ":";
+        layout += std::to_string(kProImportApiHashDimensions);
+
+        std::uint32_t hash = kImportHashSeed;
+        for (char c : layout)
+        {
+            hash ^= static_cast<std::uint32_t>(static_cast<unsigned char>(c));
+            hash *= kImportHashPrime;
+        }
+
+        char buffer[9]{};
+        std::snprintf(buffer, sizeof(buffer), "%08x", hash);
+        return std::string(buffer);
+    }
+
+    bool LoadAndValidateProManifest(const std::filesystem::path& fusionModelPath,
+                                    int fusionInputCount,
+                                    int branchCount,
+                                    const std::array<std::pair<int, int>, kProBranchCount>& branchLayout)
+    {
+        std::filesystem::path manifestPath = fusionModelPath.parent_path() /
+            (fusionModelPath.stem().wstring() + L".manifest.json");
+
+        if (!std::filesystem::exists(manifestPath))
+        {
+            // 旧版四分支模型没有清单，走兼容路径；新版五分支模型必须随附清单。
+            return fusionInputCount != kProBranchCount;
+        }
+
+        std::ifstream input(manifestPath, std::ios::binary);
+        if (!input.is_open())
+            return false;
+        std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        if (json.empty())
+            return false;
+
+        ProManifestFields fields;
+        if (!ParseProManifest(json, fields))
+            return false;
+
+        if (fields.SchemaVersion != kProManifestSchemaVersion)
+            return false;
+        if (fields.FeatureSchemaVersion != kProFeatureSchemaVersion)
+            return false;
+        if (!AsciiEqualsIgnoreCase(fields.FeatureHash, ComputeProFeatureLayoutHash().c_str()))
+            return false;
+        if (fields.HashAlgorithm != kImportHashAlgorithm)
+            return false;
+        if (fields.HashSeed != static_cast<double>(kImportHashSeed))
+            return false;
+        if (fields.DllHashDimensions != kProImportDllHashDimensions)
+            return false;
+        if (fields.ApiHashDimensions != kProImportApiHashDimensions)
+            return false;
+
+        std::wstring declaredFusionName(fields.FusionModelFileName.begin(), fields.FusionModelFileName.end());
+        if (!AsciiEqualsIgnoreCaseW(declaredFusionName, fusionModelPath.filename().wstring()))
+            return false;
+
+        if (fields.FusionInputCount != branchCount)
+            return false;
+        if (fields.FeatureCount != kProHybridFeatureCount)
+            return false;
+        if (!fields.HasBranches || static_cast<int>(fields.BranchNames.size()) != branchCount)
+            return false;
+
+        std::unordered_set<int> seen;
+        for (size_t i = 0; i < fields.BranchNames.size(); i++)
+        {
+            int index = ProManifestBranchIndex(fields.BranchNames[i]);
+            if (index < 0 || index >= kProBranchCount)
+                return false;
+            if (!seen.insert(index).second)
+                return false;
+
+            size_t slot = static_cast<size_t>(index);
+            int expectedCount = branchLayout[slot].first;
+            int expectedOffset = branchLayout[slot].second;
+            if (fields.BranchFeatureCounts[i] != expectedCount)
+                return false;
+            if (fields.BranchInputDimensions[i] != expectedCount)
+                return false;
+            if (fields.BranchFeatureOffsets[i] != expectedOffset)
+                return false;
+
+            std::filesystem::path branchPath = fusionModelPath.parent_path() /
+                std::filesystem::path(fields.BranchFileNames[i]);
+            if (!std::filesystem::exists(branchPath))
+                return false;
+        }
+
+        if (!std::isfinite(fields.Threshold) || fields.Threshold < 0 || fields.Threshold > 100)
+            return false;
+        if (!std::isfinite(fields.RecommendedThreshold) ||
+            fields.RecommendedThreshold < 0 || fields.RecommendedThreshold > 100)
+            return false;
+
+        return true;
+    }
+
+    int ProManifestBranchIndex(const std::string& name)
+    {
+        static constexpr std::array<const char*, kProBranchCount> names{
+            "Standard", "Flash", "RawStat", "Structural", "ImportBehavior" };
+        for (int i = 0; i < kProBranchCount; i++)
+        {
+            if (name == names[static_cast<size_t>(i)])
+                return i;
+        }
+        return -1;
     }
 
     // 从模型旁的 <model-stem>.threshold.json 读取 RecommendedThreshold（推荐阈值，Suspicious 区间下限）。
@@ -2209,29 +2630,46 @@ Options.SetIntraOpNumThreads(1);
             result->Verdict = XdowsModelNativeVerdictClean;
     }
 
-    // 返回指定模式应使用的推荐阈值：Adaptive 从对应子会话取，其余取会话自身加载值。
+    // 取指定模式生效的阈值。Adaptive 根会话从对应子会话取，其余取会话自身；
+    // 两者都为空（例如传入了未初始化的句柄）时回退到进程级默认值。
+    float FixedThresholdForMode(NativeSession* session, int mode)
+    {
+        int index = ClampModeIndex(mode);
+        if (session == nullptr)
+            return g_fixedThresholds[index];
+        if (mode == XdowsModelNativeModePro && session->AdaptivePro)
+            return session->AdaptivePro->Thresholds.Fixed[index];
+        if (mode == XdowsModelNativeModeFlash && session->AdaptiveFlash)
+            return session->AdaptiveFlash->Thresholds.Fixed[index];
+        if (mode == XdowsModelNativeModeStandard && session->AdaptiveStandard)
+            return session->AdaptiveStandard->Thresholds.Fixed[index];
+        return session->Thresholds.Fixed[index];
+    }
+
     float RecommendedThresholdForMode(NativeSession* session, int mode)
     {
+        int index = ClampModeIndex(mode);
         if (session == nullptr)
-            return ThresholdForMode(mode);
-        if (mode == XdowsModelNativeModeFlash && session->AdaptiveFlash)
-            return session->AdaptiveFlash->RecommendedThreshold;
-        if (mode == XdowsModelNativeModeStandard && session->AdaptiveStandard)
-            return session->AdaptiveStandard->RecommendedThreshold;
+            return g_fixedThresholds[index];
         if (mode == XdowsModelNativeModePro && session->AdaptivePro)
-            return session->AdaptivePro->RecommendedThreshold;
-        return session->RecommendedThreshold;
+            return session->AdaptivePro->Thresholds.Recommended[index];
+        if (mode == XdowsModelNativeModeFlash && session->AdaptiveFlash)
+            return session->AdaptiveFlash->Thresholds.Recommended[index];
+        if (mode == XdowsModelNativeModeStandard && session->AdaptiveStandard)
+            return session->AdaptiveStandard->Thresholds.Recommended[index];
+        return session->Thresholds.Recommended[index];
     }
 
     // 三档判定：probability >= 固定阈值 → Malware；固定阈值 > probability >= 推荐阈值 → Suspicious；其余 → Clean。
-    // IsThreat 对 Suspicious 也置 1，兼容只看 IsThreat 的旧调用方；DetectionName 仅威胁时设置。
+    // IsThreat 对 Suspicious 也置 1，兼容只看 IsThreat 的旧调用方。
+    // DetectionName 只在 Malware 时设置，对齐 Managed「确认威胁才产出检测名」的语义。
     void ApplyFinalVerdict(XDOWS_MODEL_NATIVE_SCAN_RESULT* result, NativeSession* session,
                            int decisionMode, float probability, int inputSize)
     {
         result->Status = XdowsModelNativeStatusOk;
         result->Probability = probability;
 
-        float fixedThreshold = ThresholdForMode(decisionMode);
+        float fixedThreshold = FixedThresholdForMode(session, decisionMode);
         float recommendedThreshold = RecommendedThresholdForMode(session, decisionMode);
         if (probability >= fixedThreshold)
         {
@@ -2247,9 +2685,6 @@ Options.SetIntraOpNumThreads(1);
             result->IsThreat = 1;
             if (CanWriteVerdict(inputSize))
                 result->Verdict = XdowsModelNativeVerdictSuspicious;
-            result->DetectionName = DuplicateString(
-                L"Xdows.Model." + ModeName(decisionMode) + L".Probability" +
-                std::to_wstring(static_cast<int>(probability)));
         }
         else
         {
@@ -2415,7 +2850,7 @@ Options.SetIntraOpNumThreads(1);
         AppendFlashFeaturesFromRegions(head, tail, totalSize, flashFeatures);
         if (!RunOnnx(session->AdaptiveFlash.get(), flashFeatures, probability, error))
             return false;
-        if (probability <= 100.0f - ThresholdForMode(XdowsModelNativeModeFlash))
+        if (probability <= 100.0f - FixedThresholdForMode(session, XdowsModelNativeModeFlash))
         {
             finalMode = XdowsModelNativeModeFlash;
             return true;
@@ -2432,7 +2867,7 @@ Options.SetIntraOpNumThreads(1);
         AppendStandardFeatures(bytes, standardFeatures);
         if (!RunOnnx(session->AdaptiveStandard.get(), standardFeatures, probability, error))
             return false;
-        if (probability <= 100.0f - ThresholdForMode(XdowsModelNativeModeStandard))
+        if (probability <= 100.0f - FixedThresholdForMode(session, XdowsModelNativeModeStandard))
         {
             finalMode = XdowsModelNativeModeStandard;
             return true;
@@ -2477,6 +2912,13 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
         *session = nativeSession.release();
         return XdowsModelNativeStatusOk;
     }
+    catch (const std::runtime_error& ex)
+    {
+        // Pro 清单校验失败与其它模型装配错误区分开，便于调用方定位部署问题。
+        if (std::strcmp(ex.what(), "pro-manifest-invalid") == 0)
+            return XdowsModelNativeStatusModelManifestInvalid;
+        return XdowsModelNativeStatusInternalError;
+    }
     catch (...)
     {
         return XdowsModelNativeStatusInternalError;
@@ -2489,6 +2931,15 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
                         XDOWS_MODEL_NATIVE_SCAN_RESULT* result,
                         int inputSize)
     {
+        // 空文件与 Managed 一致地判为不支持（NotSupportedException("不支持该文件类型")）。
+        std::error_code fileSizeError;
+        const std::uintmax_t fileSize = std::filesystem::file_size(path, fileSizeError);
+        if (!fileSizeError && fileSize == 0)
+        {
+            SetError(result, XdowsModelNativeStatusUnsupportedFile, L"unsupported-file-type", inputSize);
+            return false;
+        }
+
         std::vector<std::uint8_t> head;
         std::vector<std::uint8_t> tail;
         size_t totalSize = 0;
@@ -2498,26 +2949,11 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
             return false;
         }
 
-        if (ContainsAscii(head, "EICAR-STANDARD-ANTIVIRUS-TEST-FILE") ||
-            ContainsAscii(tail, "EICAR-STANDARD-ANTIVIRUS-TEST-FILE"))
-        {
-            result->Status = XdowsModelNativeStatusOk;
-            result->IsThreat = 1;
-            result->Probability = 100.0f;
-            result->DetectionName = DuplicateString(L"Xdows.Model.EICAR");
-            if (CanWriteVerdict(inputSize))
-                result->Verdict = XdowsModelNativeVerdictMalware;
-            return true;
-        }
-
+        // 非 PE 与 Managed 一致地判为不支持，不再静默返回 Clean。
         if (!IsPeFile(head))
         {
-            result->Status = XdowsModelNativeStatusOk;
-            result->IsThreat = 0;
-            result->Probability = 0.0f;
-            if (CanWriteVerdict(inputSize))
-                result->Verdict = XdowsModelNativeVerdictClean;
-            return true;
+            SetError(result, XdowsModelNativeStatusUnsupportedFile, L"unsupported-file-type", inputSize);
+            return false;
         }
 
         float probability = 0;
@@ -2551,6 +2987,15 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
                          XDOWS_MODEL_NATIVE_SCAN_RESULT* result,
                          int inputSize)
     {
+        // 空文件与 Managed 一致地判为不支持（NotSupportedException("不支持该文件类型")）。
+        std::error_code fileSizeError;
+        const std::uintmax_t fileSize = std::filesystem::file_size(path, fileSizeError);
+        if (!fileSizeError && fileSize == 0)
+        {
+            SetError(result, XdowsModelNativeStatusUnsupportedFile, L"unsupported-file-type", inputSize);
+            return false;
+        }
+
         std::vector<std::uint8_t> bytes;
         if (!ReadAllBytes(path, bytes))
         {
@@ -2558,25 +3003,11 @@ extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeInitialize(
             return false;
         }
 
-        if (ContainsAscii(bytes, "EICAR-STANDARD-ANTIVIRUS-TEST-FILE"))
-        {
-            result->Status = XdowsModelNativeStatusOk;
-            result->IsThreat = 1;
-            result->Probability = 100.0f;
-            result->DetectionName = DuplicateString(L"Xdows.Model.EICAR");
-            if (CanWriteVerdict(inputSize))
-                result->Verdict = XdowsModelNativeVerdictMalware;
-            return true;
-        }
-
+        // 非 PE 与 Managed 一致地判为不支持，不再静默返回 Clean。
         if (!IsPeFile(bytes))
         {
-            result->Status = XdowsModelNativeStatusOk;
-            result->IsThreat = 0;
-            result->Probability = 0.0f;
-            if (CanWriteVerdict(inputSize))
-                result->Verdict = XdowsModelNativeVerdictClean;
-            return true;
+            SetError(result, XdowsModelNativeStatusUnsupportedFile, L"unsupported-file-type", inputSize);
+            return false;
         }
 
         float probability = 0;
@@ -2665,4 +3096,125 @@ extern "C" XDOWS_MODEL_NATIVE_API void __stdcall XdowsModelNativeFreeString(
 {
     if (value != nullptr)
         CoTaskMemFree(value);
+}
+
+extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeConfigureThresholds(
+    const float* fixedThresholds,
+    int autoThresholdSelection)
+{
+    if (fixedThresholds == nullptr)
+        return XdowsModelNativeStatusInvalidArgument;
+
+    for (int i = 0; i < 3; i++)
+    {
+        float value = fixedThresholds[i];
+        if (!std::isfinite(value) || value < 0.0f || value > 100.0f)
+            return XdowsModelNativeStatusInvalidArgument;
+    }
+
+    g_fixedThresholds[0] = fixedThresholds[0];
+    g_fixedThresholds[1] = fixedThresholds[1];
+    g_fixedThresholds[2] = fixedThresholds[2];
+    g_autoThresholdSelection = autoThresholdSelection != 0;
+    return XdowsModelNativeStatusOk;
+}
+
+extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativePredict(
+    void* session,
+    const float* features,
+    int featureCount,
+    XDOWS_MODEL_NATIVE_SCAN_RESULT* result)
+{
+    int inputSize = 0;
+    if (result != nullptr)
+        inputSize = result->Size;
+    ResetResult(result, inputSize);
+
+    if (session == nullptr || features == nullptr || result == nullptr || featureCount <= 0)
+        return XdowsModelNativeStatusInvalidArgument;
+
+    auto* nativeSession = static_cast<NativeSession*>(session);
+
+    // Adaptive 不支持直接特征推理，对齐 Managed：PredictWithMlNet 只走 Standard 会话。
+    if (nativeSession->Mode == XdowsModelNativeModeAdaptive)
+    {
+        SetError(result, XdowsModelNativeStatusInvalidArgument, L"predict-unsupported-for-adaptive", inputSize);
+        return XdowsModelNativeStatusInvalidArgument;
+    }
+
+    // Pro 有两种合法形态：融合向量（= 分支数）直跑融合模型；
+    // 混合特征（519/5143）由 RunOnnx 内部按分支切分后再融合。
+    bool proFusionVector = false;
+    if (nativeSession->Mode == XdowsModelNativeModePro)
+    {
+        if (IsProFusionBranchCount(featureCount))
+        {
+            proFusionVector = true;
+        }
+        else if (featureCount != kProHybridFeatureCount && featureCount != kProLegacyHybridFeatureCount)
+        {
+            SetError(result, XdowsModelNativeStatusInvalidArgument, L"pro-feature-count-mismatch", inputSize);
+            return XdowsModelNativeStatusInvalidArgument;
+        }
+    }
+    else
+    {
+        int expected = nativeSession->Mode == XdowsModelNativeModeFlash
+            ? kFlashFeatureCount
+            : kStandardFeatureCount;
+        if (featureCount != expected)
+        {
+            SetError(result, XdowsModelNativeStatusInvalidArgument, L"feature-count-mismatch", inputSize);
+            return XdowsModelNativeStatusInvalidArgument;
+        }
+    }
+
+    std::vector<float> values(features, features + static_cast<size_t>(featureCount));
+
+    float probability = 0.0f;
+    std::wstring error;
+    bool ran = proFusionVector
+        ? RunOnnxSession(nativeSession->Session.get(), featureCount, values, probability, error)
+        : RunOnnx(nativeSession, values, probability, error);
+
+    if (!ran)
+    {
+        SetError(result, XdowsModelNativeStatusInternalError, error.empty() ? L"onnx-run-failed" : error, inputSize);
+        return XdowsModelNativeStatusInternalError;
+    }
+
+    ApplyFinalVerdict(result, nativeSession, nativeSession->Mode, probability, inputSize);
+
+    // 与 Managed PredictWithMlNet 一样，直接特征推理不产出检测名。
+    if (result->DetectionName != nullptr)
+    {
+        XdowsModelNativeFreeString(result->DetectionName);
+        result->DetectionName = nullptr;
+    }
+
+    return XdowsModelNativeStatusOk;
+}
+
+extern "C" XDOWS_MODEL_NATIVE_API int __stdcall XdowsModelNativeGetSessionInfo(
+    void* session,
+    XDOWS_MODEL_NATIVE_SESSION_INFO* info)
+{
+    if (session == nullptr || info == nullptr)
+        return XdowsModelNativeStatusInvalidArgument;
+    if (info->Size < static_cast<int>(sizeof(XDOWS_MODEL_NATIVE_SESSION_INFO)))
+        return XdowsModelNativeStatusInvalidArgument;
+
+    auto* nativeSession = static_cast<NativeSession*>(session);
+
+    info->Mode = nativeSession->Mode;
+    info->FeatureCount = nativeSession->FeatureCount;
+    info->AutoThresholdSelection = nativeSession->Thresholds.AutoSelection ? 1 : 0;
+    info->FixedStandard = FixedThresholdForMode(nativeSession, XdowsModelNativeModeStandard);
+    info->FixedFlash = FixedThresholdForMode(nativeSession, XdowsModelNativeModeFlash);
+    info->FixedPro = FixedThresholdForMode(nativeSession, XdowsModelNativeModePro);
+    info->RecommendedStandard = RecommendedThresholdForMode(nativeSession, XdowsModelNativeModeStandard);
+    info->RecommendedFlash = RecommendedThresholdForMode(nativeSession, XdowsModelNativeModeFlash);
+    info->RecommendedPro = RecommendedThresholdForMode(nativeSession, XdowsModelNativeModePro);
+    info->ModelPath = DuplicateString(nativeSession->ModelPath.wstring());
+    return XdowsModelNativeStatusOk;
 }

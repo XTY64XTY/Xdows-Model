@@ -69,28 +69,28 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <XdowsOnnxRuntimeVersion>1.28.0</XdowsOnnxRuntimeVersion>
-    <NuGetPackageRoot Condition="'$(NuGetPackageRoot)' == '' And Exists('D:\NuGetPackages\microsoft.ml.onnxruntime\$(XdowsOnnxRuntimeVersion)\')">D:\NuGetPackages\</NuGetPackageRoot>
+    <OnnxRuntimeVersion>1.28.0</OnnxRuntimeVersion>
+    <NuGetPackageRoot Condition="'$(NuGetPackageRoot)' == '' And Exists('D:\NuGetPackages\microsoft.ml.onnxruntime\$(OnnxRuntimeVersion)\')">D:\NuGetPackages\</NuGetPackageRoot>
     <NuGetPackageRoot Condition="'$(NuGetPackageRoot)' == ''">$(UserProfile)\.nuget\packages\</NuGetPackageRoot>
-    <XdowsOnnxRuntimePackageRoot>$(NuGetPackageRoot)microsoft.ml.onnxruntime\$(XdowsOnnxRuntimeVersion)\</XdowsOnnxRuntimePackageRoot>
-    <XdowsOnnxRuntimeRid Condition="'$(Platform)' == 'ARM64'">arm64</XdowsOnnxRuntimeRid>
-    <XdowsOnnxRuntimeRid Condition="'$(XdowsOnnxRuntimeRid)' == ''">x64</XdowsOnnxRuntimeRid>
+    <OnnxRuntimePackageRoot>$(NuGetPackageRoot)microsoft.ml.onnxruntime\$(OnnxRuntimeVersion)\</OnnxRuntimePackageRoot>
+    <OnnxRuntimeRid Condition="'$(Platform)' == 'ARM64'">arm64</OnnxRuntimeRid>
+    <OnnxRuntimeRid Condition="'$(OnnxRuntimeRid)' == ''">x64</OnnxRuntimeRid>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>include;$(XdowsOnnxRuntimePackageRoot)build\native\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>include;$(OnnxRuntimePackageRoot)build\native\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>XDOWS_MODEL_NATIVE_EXPORTS;WIN32_LEAN_AND_MEAN;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalLibraryDirectories>$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(OnnxRuntimePackageRoot)runtimes\win-$(OnnxRuntimeRid)\native;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>onnxruntime.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>if exist "$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native\onnxruntime.dll" copy /Y "$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native\onnxruntime.dll" "$(OutDir)"&#xD;&#xA;if exist "$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native\onnxruntime_providers_shared.dll" copy /Y "$(XdowsOnnxRuntimePackageRoot)runtimes\win-$(XdowsOnnxRuntimeRid)\native\onnxruntime_providers_shared.dll" "$(OutDir)"</Command>
+      <Command>if exist "$(OnnxRuntimePackageRoot)runtimes\win-$(OnnxRuntimeRid)\native\onnxruntime.dll" copy /Y "$(OnnxRuntimePackageRoot)runtimes\win-$(OnnxRuntimeRid)\native\onnxruntime.dll" "$(OutDir)"&#xD;&#xA;if exist "$(OnnxRuntimePackageRoot)runtimes\win-$(OnnxRuntimeRid)\native\onnxruntime_providers_shared.dll" copy /Y "$(OnnxRuntimePackageRoot)runtimes\win-$(OnnxRuntimeRid)\native\onnxruntime_providers_shared.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
