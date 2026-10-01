@@ -1,13 +1,13 @@
 {
   "SchemaVersion": 1,
   "ModelMode": "Flash",
-  "RecommendedThreshold": 60.89789962768555,
+  "RecommendedThreshold": 61.233646392822266,
   "SelectionMethod": "\u4EE3\u4EF7\u654F\u611F\uFF081 \u8BEF\u62A5 = 2.65 \u6F0F\u62A5\uFF09",
   "FalsePositiveCostRatio": 2.65,
-  "FalseNegative": 596,
-  "FalsePositive": 176,
-  "TruePositiveRate": 0.9462142405920043,
-  "FalsePositiveRate": 0.01051499581789939,
-  "EvaluatedSamples": 27819,
-  "GeneratedAt": "2026-09-26 00:36:47"
+  "FalseNegative": 640,
+  "FalsePositive": 175,
+  "TruePositiveRate": 0.9422747361775052,
+  "FalsePositiveRate": 0.010396245470207332,
+  "EvaluatedSamples": 27920,
+  "GeneratedAt": "2026-10-02 00:07:39"
 }

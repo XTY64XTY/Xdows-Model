@@ -1,13 +1,13 @@
 {
   "SchemaVersion": 1,
   "ModelMode": "Pro",
-  "RecommendedThreshold": 73.1979751586914,
+  "RecommendedThreshold": 65.6491928100586,
   "SelectionMethod": "\u4EE3\u4EF7\u654F\u611F\uFF081 \u8BEF\u62A5 = 2.65 \u6F0F\u62A5\uFF09",
   "FalsePositiveCostRatio": 2.65,
-  "FalseNegative": 447,
-  "FalsePositive": 123,
-  "TruePositiveRate": 0.9596497562736956,
-  "FalsePositiveRate": 0.007454545454545454,
-  "EvaluatedSamples": 27578,
-  "GeneratedAt": "2026-09-26 10:33:54"
+  "FalseNegative": 413,
+  "FalsePositive": 160,
+  "TruePositiveRate": 0.9627390833634067,
+  "FalsePositiveRate": 0.009641458270563423,
+  "EvaluatedSamples": 27679,
+  "GeneratedAt": "2026-10-02 01:29:25"
 }
