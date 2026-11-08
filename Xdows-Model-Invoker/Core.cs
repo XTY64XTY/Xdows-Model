@@ -460,8 +460,8 @@ namespace Xdows_Model_Invoker
         private static void ValidateProFeatureDimension()
         {
             int featureCount = GetProFeatureDimension();
-            if (featureCount == FeatureSchema.ProFusionFeatureCount ||
-                featureCount == FeatureSchema.ProLegacyFusionFeatureCount)
+            if (featureCount is FeatureSchema.ProFusionFeatureCount or
+                FeatureSchema.ProLegacyFusionFeatureCount)
             {
                 if (string.IsNullOrEmpty(_loadedModelPath))
                     throw new InvalidOperationException("Pro 融合模型路径不可用。");
@@ -470,8 +470,8 @@ namespace Xdows_Model_Invoker
                 return;
             }
 
-            if (featureCount != FeatureSchema.ProHybridFeatureCount &&
-                featureCount != FeatureSchema.ProLegacyHybridFeatureCount)
+            if (featureCount is not FeatureSchema.ProHybridFeatureCount and
+                not FeatureSchema.ProLegacyHybridFeatureCount)
             {
                 throw new InvalidOperationException(
                     $"Pro 模型特征维度不匹配：当前模型为 {featureCount} 维，期望 {FeatureSchema.ProHybridFeatureCount} 维（新版五分支）或 {FeatureSchema.ProLegacyHybridFeatureCount} 维（旧版）。请重新训练并导出新的 Xdows-Model-Pro.onnx。");
@@ -584,7 +584,7 @@ namespace Xdows_Model_Invoker
             if (float.IsNaN(threshold) || float.IsInfinity(threshold))
                 throw new ArgumentOutOfRangeException(nameof(threshold), "Threshold must be a finite percentage.");
 
-            if (threshold < 0 || threshold > 100)
+            if (threshold is < 0 or > 100)
                 throw new ArgumentOutOfRangeException(nameof(threshold), "Threshold must be between 0 and 100.");
 
             return threshold;

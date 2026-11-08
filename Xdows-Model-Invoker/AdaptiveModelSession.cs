@@ -32,13 +32,13 @@ public sealed class AdaptiveModelSession : IDisposable
         ValidateDimension(_flashSession, FeatureSchema.FlashFeatureCount, "Flash");
         ValidateDimension(_standardSession, FeatureSchema.StandardFeatureCount, "Standard");
         int proDimension = ProEnsembleSession.ReadFeatureDimension(_proSession);
-        if (proDimension == FeatureSchema.ProFusionFeatureCount ||
-            proDimension == FeatureSchema.ProLegacyFusionFeatureCount)
+        if (proDimension is FeatureSchema.ProFusionFeatureCount or
+            FeatureSchema.ProLegacyFusionFeatureCount)
         {
             _proEnsemble = new ProEnsembleSession(proPath, proDimension);
         }
-        else if (proDimension == FeatureSchema.ProHybridFeatureCount ||
-                 proDimension == FeatureSchema.ProLegacyHybridFeatureCount)
+        else if (proDimension is FeatureSchema.ProHybridFeatureCount or
+                 FeatureSchema.ProLegacyHybridFeatureCount)
         {
             _proSingleModelDimension = proDimension;
         }

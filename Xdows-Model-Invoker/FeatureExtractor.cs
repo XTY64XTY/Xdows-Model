@@ -36,16 +36,16 @@ internal static class ByteAnalysisHelper
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsWhitespace(byte b) => b == 9 || b == 10 || b == 13 || b == 32;
+    private static bool IsWhitespace(byte b) => b is 9 or 10 or 13 or 32;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsPrintable(byte b) => b >= 32 && b <= 126;
+    private static bool IsPrintable(byte b) => b is >= 32 and <= 126;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsLetter(byte b) => (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
+    private static bool IsLetter(byte b) => b is >= 65 and <= 90 or >= 97 and <= 122;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsDigit(byte b) => b >= 48 && b <= 57;
+    private static bool IsDigit(byte b) => b is >= 48 and <= 57;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsHighByte(byte b) => b >= 0x80;
@@ -119,12 +119,12 @@ internal static class ByteAnalysisHelper
             byte b = (byte)i;
             byte c = 0;
             if (b >= 0x80) c |= 0x01;
-            if (b == 9 || b == 10 || b == 13 || b == 32) c |= 0x02;
-            if (b >= 32 && b <= 126)
+            if (b is 9 or 10 or 13 or 32) c |= 0x02;
+            if (b is >= 32 and <= 126)
             {
                 c |= 0x04;
-                if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122)) c |= 0x08;
-                else if (b >= 48 && b <= 57) c |= 0x10;
+                if (b is >= 65 and <= 90 or >= 97 and <= 122) c |= 0x08;
+                else if (b is >= 48 and <= 57) c |= 0x10;
             }
             classes[i] = c;
         }
@@ -1306,12 +1306,12 @@ public static class ProRawStatExtractor
             if (b >= 0x80)
                 highByteCount++;
 
-            if (b >= 32 && b <= 126)
+            if (b is >= 32 and <= 126)
             {
                 printableCount++;
-                if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122))
+                if (b is >= 65 and <= 90 or >= 97 and <= 122)
                     letterCount++;
-                else if (b >= 48 && b <= 57)
+                else if (b is >= 48 and <= 57)
                     digitCount++;
             }
         }
